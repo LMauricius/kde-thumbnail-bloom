@@ -344,6 +344,8 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
     m_layoutOptions.scaleStep = 0.05;
     m_layoutOptions.margin = 8;
 
+    m_thumbnailOpacity = std::clamp(ThumbnailBloomConfig::opacity() / 100.0, 0.1, 1.0);
+
     // The system's animation speed is already folded into animationTime().
     m_animationDuration = std::max(std::chrono::milliseconds(1), animationTime(std::chrono::milliseconds(250)));
 
@@ -443,9 +445,15 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     BloomState &state = it->second;
 
     state.base = base;
+
+    // A window travelling back to its real geometry is on its way to being an
+    // ordinary window again, so it fades back to fully opaque just like the
+    // hovered thumbnail does.
+    const bool thumbnail = !sameRect(base, QRectF(w->frameGeometry()));
     const QRectF target = state.hovered
         ? grownRect(base, QRectF(w->frameGeometry()), QRectF(effects->clientArea(MaximizeArea, w)))
         : base;
+    const qreal targetOpacity = (thumbnail && !state.hovered) ? m_thumbnailOpacity : 1.0;
 
     // The click target follows the resting rectangle, not the animation: a
     // thumbnail can be hovered and clicked from the moment it sets off, but only
@@ -454,13 +462,16 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
 
     if (inserted) {
         state.from = state.current = state.to = QRectF(w->frameGeometry());
+        state.fromOpacity = state.currentOpacity = state.toOpacity = 1.0;
         state.timeline.setEasingCurve(QEasingCurve::InOutCubic);
-    } else if (sameRect(state.to, target)) {
+    } else if (sameRect(state.to, target) && qFuzzyCompare(state.toOpacity, targetOpacity)) {
         return;
     }
 
     state.from = state.current;
     state.to = target;
+    state.fromOpacity = state.currentOpacity;
+    state.toOpacity = targetOpacity;
     state.timeline.setDuration(m_animationDuration);
     state.timeline.reset();
 
@@ -762,6 +773,7 @@ void ThumbnailBloomEffect::applyTransform(EffectWindow *w, const BloomState &sta
     data.setScale(QVector2D(state.current.width() / natural.width(), state.current.height() / natural.height()));
     data.setXTranslation(state.current.x() - natural.x());
     data.setYTranslation(state.current.y() - natural.y());
+    data.multiplyOpacity(state.currentOpacity);
 }
 
 void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
@@ -771,7 +783,9 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     std::vector<EffectWindow *> settledBack;
     for (auto &[w, state] : m_states) {
         state.timeline.advance(data.view);
-        state.current = interpolateRect(state.from, state.to, state.timeline.value());
+        const qreal progress = state.timeline.value();
+        state.current = interpolateRect(state.from, state.to, progress);
+        state.currentOpacity = state.fromOpacity * (1.0 - progress) + state.toOpacity * progress;
 
         if (!state.timeline.done()) {
             m_animating = true;
@@ -831,7 +845,8 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 void ThumbnailBloomEffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data)
 {
     const auto it = m_states.find(w);
-    if (it != m_states.end() && !sameRect(it->second.current, QRectF(w->frameGeometry()))) {
+    if (it != m_states.end()
+        && (!sameRect(it->second.current, QRectF(w->frameGeometry())) || it->second.currentOpacity < 1.0)) {
         // The window is painted somewhere else and at another size, so it may
         // neither be clipped against nor culled by its real geometry.
         data.setTransformed();

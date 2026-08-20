@@ -33,5 +33,11 @@
             <min>5</min>
             <max>100</max>
         </entry>
+        <entry name="Opacity" type="Int">
+            <label>Thumbnail opacity, in percent</label>
+            <default>90</default>
+            <min>10</min>
+            <max>100</max>
+        </entry>
     </group>
 </kcfg>
