@@ -1198,15 +1198,21 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const R
         return;
     }
 
-    // Four quads laid inside the edges of the thumbnail, in logical screen
-    // coordinates: that is what the projection matrix of the viewport expects.
-    const QRectF inner = rect.adjusted(outlineWidth, outlineWidth, -outlineWidth, -outlineWidth);
+    // Four quads laid inside the edges of the thumbnail. The projection matrix of
+    // the viewport orthos over the render rect scaled by the output scale, so the
+    // vertices are logical screen coordinates multiplied by that scale (device
+    // pixels, but with the origin of the whole logical space, not of the output);
+    // on a screen scaled by 1 the two are the same, on any other one they are not.
+    const qreal scale = viewport.scale();
+    const QRectF scaled(rect.topLeft() * scale, rect.size() * scale);
+    const qreal width = outlineWidth * scale;
+    const QRectF inner = scaled.adjusted(width, width, -width, -width);
     std::vector<QVector2D> vertices;
     vertices.reserve(24);
-    appendQuad(vertices, QRectF(rect.left(), rect.top(), rect.width(), outlineWidth));
-    appendQuad(vertices, QRectF(rect.left(), inner.bottom(), rect.width(), outlineWidth));
-    appendQuad(vertices, QRectF(rect.left(), inner.top(), outlineWidth, inner.height()));
-    appendQuad(vertices, QRectF(inner.right(), inner.top(), outlineWidth, inner.height()));
+    appendQuad(vertices, QRectF(scaled.left(), scaled.top(), scaled.width(), width));
+    appendQuad(vertices, QRectF(scaled.left(), inner.bottom(), scaled.width(), width));
+    appendQuad(vertices, QRectF(scaled.left(), inner.top(), width, inner.height()));
+    appendQuad(vertices, QRectF(inner.right(), inner.top(), width, inner.height()));
 
     GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
     vbo->reset();
