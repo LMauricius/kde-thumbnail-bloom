@@ -12,6 +12,7 @@
 #include <effect/timeline.h>
 #include <input.h>
 
+#include <QPointer>
 #include <QRegion>
 #include <QRectF>
 #include <QTimer>
@@ -51,8 +52,8 @@ public:
      *
      * \a shields is where the shields are, \a bloomed the windows they hide
      * from the input, and \a thumbnails the click targets: a thumbnail belongs
-     * to its own window, so everything but the left button is dropped there
-     * rather than handed to whatever the thumbnail is painted over.
+     * to its own window, so every button that means nothing on a thumbnail is
+     * dropped there rather than handed to whatever it is painted over.
      */
     void setState(const QRegion &shields, const QSet<KWin::Window *> &bloomed, const QRegion &thumbnails);
 
@@ -77,6 +78,35 @@ private:
     QRegion m_thumbnails;
     QSet<KWin::Window *> m_bloomed;
 };
+/*!
+ * Keeps a move started on a thumbnail following the finger that started it.
+ *
+ * KWin's own move filter latches the touch point at the moment it goes down, so
+ * a move begun in the middle of a sequence (which is what dragging a thumbnail
+ * is: the finger has to travel before the drag is one) is never fed anything.
+ * This filter takes that sequence over instead, and it sits ahead of the move
+ * filter so the events reach it whatever that one decides to do with them.
+ */
+class TouchDragFilter : public KWin::InputEventFilter
+{
+public:
+    TouchDragFilter();
+
+    /*! Starts following the point \a id, moving \a window with it. */
+    void arm(KWin::Window *window, qint32 id);
+
+    bool touchMotion(KWin::TouchMotionEvent *event) override;
+    bool touchUp(KWin::TouchUpEvent *event) override;
+    bool touchCancel() override;
+
+private:
+    /*! Stops following the sequence, ending the move as \a cancel asks. */
+    void disarm(bool cancel);
+
+    QPointer<KWin::Window> m_window;
+    qint32 m_id = -1;
+};
+
 /*!
  * Shows covered inactive windows as thumbnails on the nearest free space.
  *
@@ -132,10 +162,23 @@ private:
     void scheduleRelayout();
     /*! Starts or retargets the animation of \a w towards \a base, grown if hovered. */
     void retarget(KWin::EffectWindow *w, const QRectF &base);
+    /*! Returns the bloomed window whose window menu is open, if any. */
+    KWin::EffectWindow *menuOwner() const;
+    /*! Opens the window menu of \a w at \a pos and keeps its thumbnail focused. */
+    void openWindowMenu(KWin::EffectWindow *w, const QPointF &pos);
     /*! Marks the topmost thumbnail whose exposed area holds \a pos as hovered, and the rest as not. */
     void updateHover(const QPointF &pos);
     /*! Marks the thumbnail of \a w as hovered or not and animates it accordingly. */
     void setHovered(KWin::EffectWindow *w, bool hovered);
+    /*!
+     * Activates \a w and hands it to the interactive move, with \a pos held.
+     *
+     * The window is put where its thumbnail is before the move begins, so that
+     * it comes out from under the finger or the pointer instead of jumping back
+     * to wherever it really was. \a touchId is the point driving the move, or
+     * -1 when the pointer is.
+     */
+    void startThumbnailMove(KWin::EffectWindow *w, const QPointF &pos, qint32 touchId);
     /*! Drops \a w's state, hiding its click target right away. */
     void forget(KWin::EffectWindow *w);
     /*! Applies the thumbnail transformation of \a state to \a data. */
@@ -174,7 +217,10 @@ private:
     LayoutOptions m_layoutOptions;
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
     ShieldFilter m_shieldFilter;
+    TouchDragFilter m_touchDragFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints
+    KWin::EffectWindow *m_menuOwner = nullptr; //!< window whose menu is open, kept focused meanwhile
+    KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing
     KWin::EffectWindow *m_liftedWindow = nullptr; //!< thumbnail drawn above the other windows
     KWin::EffectWindow *m_liftAnchor = nullptr; //!< window it is drawn right after
     bool m_liftPending = false; //!< whether it still has to be drawn in this pass

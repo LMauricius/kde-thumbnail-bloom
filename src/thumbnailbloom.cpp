@@ -15,6 +15,7 @@
 #include <cursor.h>
 #include <effect/effecthandler.h>
 #include <input_event.h>
+#include <options.h>
 #include <pointer_input.h>
 #include <touch_input.h>
 #include <window.h>
@@ -237,9 +238,13 @@ bool ShieldFilter::pointerButton(PointerButtonEvent *event)
 {
     redirect(input()->pointer(), event->position);
 
-    // The left button has to reach the click target, an internal window that
-    // only gets the press if no earlier filter takes it.
-    return event->button != Qt::LeftButton && m_thumbnails.contains(event->position.toPoint());
+    // The left and the right button have to reach the click target, an internal
+    // window that only gets the press if no earlier filter takes it: one
+    // activates or drags the thumbnail's window, the other opens its menu.
+    if (event->button == Qt::LeftButton || event->button == Qt::RightButton) {
+        return false;
+    }
+    return m_thumbnails.contains(event->position.toPoint());
 }
 
 bool ShieldFilter::pointerAxis(PointerAxisEvent *event)
@@ -257,6 +262,67 @@ bool ShieldFilter::touchDown(TouchDownEvent *event)
     return false;
 }
 
+TouchDragFilter::TouchDragFilter()
+    : InputEventFilter(InputFilterOrder::Effects)
+{
+}
+
+void TouchDragFilter::arm(Window *window, qint32 id)
+{
+    m_window = window;
+    m_id = id;
+}
+
+void TouchDragFilter::disarm(bool cancel)
+{
+    if (m_window && workspace()->moveResizeWindow() == m_window) {
+        if (cancel) {
+            m_window->cancelInteractiveMoveResize();
+        } else {
+            m_window->endInteractiveMoveResize();
+        }
+    }
+    m_window.clear();
+    m_id = -1;
+}
+
+bool TouchDragFilter::touchMotion(TouchMotionEvent *event)
+{
+    if (!m_window || event->id != m_id) {
+        return false;
+    }
+
+    // Anything else that ends the move (a shortcut, the window closing) leaves
+    // the sequence to whoever else wants it.
+    if (workspace()->moveResizeWindow() != m_window) {
+        disarm(false);
+        return false;
+    }
+
+    m_window->updateInteractiveMoveResize(event->pos, input()->keyboardModifiers());
+    return true;
+}
+
+bool TouchDragFilter::touchUp(TouchUpEvent *event)
+{
+    if (!m_window || event->id != m_id) {
+        return false;
+    }
+
+    disarm(false);
+    return true;
+}
+
+bool TouchDragFilter::touchCancel()
+{
+    if (!m_window) {
+        return false;
+    }
+
+    disarm(true);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -265,6 +331,7 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
     : m_animationDuration(250)
 {
     input()->installInputEventFilter(&m_shieldFilter);
+    input()->installInputEventFilter(&m_touchDragFilter);
 
     // Changes tend to arrive in bursts (a raise is a stacking change plus an
     // activation plus a geometry change), so they only mark the layout dirty.
@@ -273,10 +340,19 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
     connect(&m_relayoutTimer, &QTimer::timeout, this, &ThumbnailBloomEffect::relayout);
 
     connect(effects, &EffectsHandler::windowAdded, this, [this](EffectWindow *w) {
+        // The first internal window to appear while a window menu is being
+        // opened is that menu; see openWindowMenu().
+        if (m_menuOwner && !m_menuPopup && w->internalWindow()) {
+            m_menuPopup = w;
+        }
         watch(w);
         scheduleRelayout();
     });
     connect(effects, &EffectsHandler::windowClosed, this, [this](EffectWindow *w) {
+        if (w == m_menuPopup) {
+            m_menuPopup = nullptr;
+            m_menuOwner = nullptr;
+        }
         forget(w);
         scheduleRelayout();
     });
@@ -469,15 +545,54 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
         return;
     }
 
-    state.from = state.current;
+    // A target that keeps moving (a window being dragged over the thumbnail)
+    // retargets the animation on every frame. Restarting it each time would
+    // leave the thumbnail forever at the slow start of the easing curve, which
+    // looks like it is stuck, so a running animation only gets the new
+    // destination: it keeps the point it set off from and the time it has
+    // already spent, and still arrives one animation duration after it left.
     state.to = target;
-    state.fromOpacity = state.currentOpacity;
     state.toOpacity = targetOpacity;
+    if (!inserted && !state.timeline.done()) {
+        m_animating = true;
+        effects->addRepaintFull();
+        return;
+    }
+
+    state.from = state.current;
+    state.fromOpacity = state.currentOpacity;
     state.timeline.setDuration(m_animationDuration);
     state.timeline.reset();
 
     m_animating = true;
     effects->addRepaintFull();
+}
+
+EffectWindow *ThumbnailBloomEffect::menuOwner() const
+{
+    return (m_menuOwner && m_states.count(m_menuOwner)) ? m_menuOwner : nullptr;
+}
+
+void ThumbnailBloomEffect::openWindowMenu(EffectWindow *w, const QPointF &pos)
+{
+    Window *window = w->window();
+    if (!window) {
+        return;
+    }
+
+    // KWin offers no way to ask whether the window menu is open (UserActionsMenu
+    // is not part of the installed headers), so the menu is recognised by its
+    // own window: it is an internal window and it is created inside the command
+    // below, which shows it synchronously. From there windowClosed says when it
+    // is gone. If nothing was added, no menu appeared and there is nothing to
+    // keep focused either.
+    m_menuOwner = w;
+    m_menuPopup = nullptr;
+    window->performMousePressCommand(Options::MouseOperationsMenu, pos);
+    if (!m_menuPopup) {
+        m_menuOwner = nullptr;
+    }
+    scheduleRelayout();
 }
 
 void ThumbnailBloomEffect::updateHover(const QPointF &pos)
@@ -488,6 +603,18 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     const auto targetable = [](const BloomState &state) {
         return state.overlay && state.overlay->isVisible();
     };
+
+    // The menu of a thumbnail belongs to that thumbnail. It is a popup, so it
+    // takes the pointer and is cut out of the hit region, and the thumbnail
+    // would shrink away under its own menu; it stays focused until the menu is
+    // gone instead. The menu closing is a window closing, which schedules the
+    // relayout that ends this.
+    if (EffectWindow *owner = menuOwner()) {
+        for (const auto &[w, state] : m_states) {
+            setHovered(w, w == owner);
+        }
+        return;
+    }
 
     // The hit test is against the exposed part of the resting rectangle, never
     // the grown one: the pointer keeps the thumbnail enlarged only while it
@@ -540,6 +667,10 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
     if (m_liftedWindow == w) {
         m_liftedWindow = nullptr;
     }
+    if (m_menuOwner == w) {
+        m_menuOwner = nullptr;
+        m_menuPopup = nullptr;
+    }
 
     // Extracted rather than erased in place: destroying the overlay makes KWin
     // emit windowClosed for its internal window synchronously, and that handler
@@ -559,6 +690,42 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
         }
     }
     effects->addRepaintFull();
+}
+
+void ThumbnailBloomEffect::startThumbnailMove(EffectWindow *w, const QPointF &pos, qint32 touchId)
+{
+    const auto it = m_states.find(w);
+    Window *window = w->window();
+    if (it == m_states.end() || !window) {
+        return;
+    }
+
+    // The window is dragged out of its thumbnail, so that is where it starts:
+    // its own size, centred on the rectangle the pointer or the finger is
+    // actually on, kept inside the work area.
+    QRectF target(QPointF(), QRectF(w->frameGeometry()).size());
+    target.moveCenter(it->second.current.center());
+    target = window->keepInArea(target, effects->clientArea(MaximizeArea, w));
+
+    // Activating first is what makes the drag count as using the window; the
+    // relayout it schedules then animates the thumbnail into the geometry set
+    // here instead of sending it back to where the window used to be. A window
+    // that cannot be moved at all still gets that much out of the gesture.
+    effects->activateWindow(w);
+    if (!window->isMovable()) {
+        return;
+    }
+    window->move(target.topLeft());
+
+    // MouseMove takes its grab offset as a fraction of the geometry the window
+    // has at this very moment, so moving it beforehand is what keeps it from
+    // jumping once the pointer starts driving it. From here KWin's own move
+    // filter follows the pointer; a touch sequence has to be fed by the effect,
+    // because that filter only follows a point it saw go down.
+    window->performMousePressCommand(Options::MouseMove, pos);
+    if (touchId >= 0) {
+        m_touchDragFilter.arm(window, touchId);
+    }
 }
 
 void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
@@ -587,8 +754,16 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
 
     if (!state.overlay) {
         state.overlay = std::make_unique<ThumbnailOverlay>();
-        connect(state.overlay.get(), &ThumbnailOverlay::clicked, this, [w]() {
+        connect(state.overlay.get(), &ThumbnailOverlay::activated, this, [w]() {
             effects->activateWindow(w);
+        });
+        connect(state.overlay.get(), &ThumbnailOverlay::dragStarted, this, [this, w](const QPointF &pos, qint32 touchId) {
+            startThumbnailMove(w, pos, touchId);
+        });
+        // The menu command does not activate the window, which is the point: a
+        // right click is a question about the thumbnail, not a use of it.
+        connect(state.overlay.get(), &ThumbnailOverlay::menuRequested, this, [this, w](const QPointF &pos) {
+            openWindowMenu(w, pos);
         });
     }
 

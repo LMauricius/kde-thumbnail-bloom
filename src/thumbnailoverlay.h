@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <QPointF>
 #include <QRasterWindow>
+#include <QTimer>
 
 namespace ThumbnailBloom
 {
@@ -44,9 +46,15 @@ protected:
 /*!
  * The click target placed exactly on top of a thumbnail.
  *
- * It covers the thumbnail's rectangle, paints nothing and reports the clicks it
- * swallows through clicked(). The hover outline is drawn by the effect instead,
- * so that it stays in step with the animation.
+ * It covers the thumbnail's rectangle, paints nothing and turns the gestures it
+ * swallows into the three things a thumbnail can do: activate its window, drag
+ * it out of the thumbnail, or open its window menu. The hover outline is drawn
+ * by the effect instead, so that it stays in step with the animation.
+ *
+ * A press never decides anything on its own; only what follows it does. The
+ * pointer keeps its focus on this window for as long as a button is down
+ * (PointerInputRedirection blocks focus updates then), so the whole gesture is
+ * seen here, and a touch sequence is followed by its point id.
  */
 class ThumbnailOverlay : public OverlayWindow
 {
@@ -57,12 +65,35 @@ public:
     ~ThumbnailOverlay() override;
 
 Q_SIGNALS:
-    /*! The overlay, and with it the thumbnail below it, was clicked. */
-    void clicked();
+    /*! A click or a tap finished on the thumbnail without turning into a drag. */
+    void activated();
+    /*!
+     * The press on the thumbnail travelled far enough to become a move.
+     *
+     * \a pos is where the pointer or the finger is now, and \a touchId the id
+     * of the touch point driving it, or -1 for the pointer.
+     */
+    void dragStarted(const QPointF &pos, qint32 touchId);
+    /*! The window menu was asked for at \a pos, by a right click or a long touch. */
+    void menuRequested(const QPointF &pos);
 
 protected:
     bool event(QEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+
+private:
+    /*! Whether \a pos is far enough from \a origin to count as a drag. */
+    static bool isDrag(const QPointF &origin, const QPointF &pos);
+
+    QPointF m_pressOrigin; //!< where the left button went down
+    bool m_pressed = false; //!< whether a left press is still undecided
+
+    QTimer m_longPressTimer;
+    QPointF m_touchOrigin; //!< where the tracked touch point went down
+    qint32 m_touchId = -1; //!< point id of the sequence being followed
+    bool m_touchArmed = false; //!< whether the sequence can still tap or long press
 };
 
 } // namespace ThumbnailBloom

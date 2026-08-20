@@ -6,8 +6,11 @@
 
 #include "thumbnailoverlay.h"
 
+#include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QStyleHints>
+#include <QTouchEvent>
 #include <QWheelEvent>
 
 namespace ThumbnailBloom
@@ -87,30 +90,117 @@ void OverlayWindow::wheelEvent(QWheelEvent *event)
     event->accept();
 }
 
-ThumbnailOverlay::ThumbnailOverlay() = default;
+ThumbnailOverlay::ThumbnailOverlay()
+{
+    // A touch has no second button, so holding still stands in for a right
+    // click. The interval is the one the rest of the desktop presses and holds
+    // for, so the gesture feels the same everywhere.
+    m_longPressTimer.setSingleShot(true);
+    m_longPressTimer.setInterval(QGuiApplication::styleHints()->mousePressAndHoldInterval());
+    connect(&m_longPressTimer, &QTimer::timeout, this, [this]() {
+        if (m_touchArmed) {
+            m_touchArmed = false;
+            Q_EMIT menuRequested(m_touchOrigin);
+        }
+    });
+}
 
 ThumbnailOverlay::~ThumbnailOverlay() = default;
 
+bool ThumbnailOverlay::isDrag(const QPointF &origin, const QPointF &pos)
+{
+    return (pos - origin).manhattanLength() >= QGuiApplication::styleHints()->startDragDistance();
+}
+
 bool ThumbnailOverlay::event(QEvent *event)
 {
-    // A tap does what a left click does. The rest of the sequence is swallowed
-    // by the base class, so a drag started on a thumbnail activates it once and
-    // then goes nowhere.
-    if (event->type() == QEvent::TouchBegin) {
+    // Only the first point of a sequence is followed; the others belong to
+    // whatever gesture is running elsewhere and are swallowed by the base class.
+    switch (event->type()) {
+    case QEvent::TouchBegin: {
+        const QList<QEventPoint> &points = static_cast<QTouchEvent *>(event)->points();
+        if (!m_touchArmed && !points.isEmpty()) {
+            m_touchId = points.first().id();
+            m_touchOrigin = points.first().globalPosition();
+            m_touchArmed = true;
+            m_longPressTimer.start();
+        }
         event->accept();
-        Q_EMIT clicked();
         return true;
     }
-
-    return OverlayWindow::event(event);
+    case QEvent::TouchUpdate: {
+        for (const QEventPoint &point : static_cast<QTouchEvent *>(event)->points()) {
+            if (!m_touchArmed || point.id() != m_touchId || !isDrag(m_touchOrigin, point.globalPosition())) {
+                continue;
+            }
+            // A finger that moved is neither a tap nor a hold any more. From
+            // here on the sequence is driven by the effect's own touch filter,
+            // because KWin's move filter only follows a point it saw go down.
+            m_touchArmed = false;
+            m_longPressTimer.stop();
+            event->accept();
+            Q_EMIT dragStarted(point.globalPosition(), m_touchId);
+            return true;
+        }
+        event->accept();
+        return true;
+    }
+    case QEvent::TouchEnd: {
+        if (m_touchArmed) {
+            m_touchArmed = false;
+            m_longPressTimer.stop();
+            event->accept();
+            Q_EMIT activated();
+            return true;
+        }
+        event->accept();
+        return true;
+    }
+    case QEvent::TouchCancel:
+        m_touchArmed = false;
+        m_longPressTimer.stop();
+        event->accept();
+        return true;
+    default:
+        return OverlayWindow::event(event);
+    }
 }
+
+// Every button is still swallowed, they just do not all mean something.
 
 void ThumbnailOverlay::mousePressEvent(QMouseEvent *event)
 {
-    // Other buttons are still swallowed, they just do not activate anything.
     event->accept();
+
+    // The left button decides nothing yet: what happens next (a release or a
+    // move) is what tells an activation from a drag apart.
     if (event->button() == Qt::LeftButton) {
-        Q_EMIT clicked();
+        m_pressed = true;
+        m_pressOrigin = event->globalPosition();
+    } else if (event->button() == Qt::RightButton) {
+        Q_EMIT menuRequested(event->globalPosition());
+    }
+}
+
+void ThumbnailOverlay::mouseMoveEvent(QMouseEvent *event)
+{
+    event->accept();
+    if (!m_pressed || !isDrag(m_pressOrigin, event->globalPosition())) {
+        return;
+    }
+
+    // The current position, not the one the press started at: the window is
+    // grabbed where the pointer is, so it does not jump by the drag threshold.
+    m_pressed = false;
+    Q_EMIT dragStarted(event->globalPosition(), -1);
+}
+
+void ThumbnailOverlay::mouseReleaseEvent(QMouseEvent *event)
+{
+    event->accept();
+    if (event->button() == Qt::LeftButton && m_pressed) {
+        m_pressed = false;
+        Q_EMIT activated();
     }
 }
 

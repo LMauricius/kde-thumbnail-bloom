@@ -3,7 +3,8 @@
 A KWin desktop effect for Plasma 6. Whenever an inactive window disappears behind another one,
 Thumbnail Bloom shrinks it into a thumbnail and slides that thumbnail to the nearest free spot on
 the same screen, so nothing is ever completely hidden. Click a thumbnail to bring its window back
-to the front.
+to the front, drag it to move the window out of the thumbnail, or right-click it for the window
+menu.
 
 Windows are never actually moved or resized: they are only painted somewhere else, at a smaller
 size.
@@ -28,6 +29,20 @@ flowchart TD
     F --> J[Put a transparent click target on the thumbnail]
     I --> J
 ```
+
+## Using a thumbnail
+
+| Gesture                    | Result                                                              |
+| -------------------------- | ------------------------------------------------------------------- |
+| Left click (on release)    | Activates the window and brings it to the front.                    |
+| Left drag                  | Activates the window and moves it, starting from the thumbnail.     |
+| Right click                | Opens the window menu, leaving the window as it is.                 |
+| Tap                        | Same as a left click.                                               |
+| Drag with a finger         | Same as a left drag.                                                |
+| Press and hold with a finger | Same as a right click.                                            |
+
+A drag picks the window up where its thumbnail is, not where the window really sits: the window
+appears at full size around the thumbnail and follows the pointer (or the finger) from there.
 
 Animations use the system's animation speed, so slowing animations down or turning them off in
 System Settings applies here too.
