@@ -363,6 +363,10 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
         scheduleRelayout();
     });
     connect(effects, &EffectsHandler::stackingOrderChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
+    // No per-window signal exists for the "show desktop" hidden flag.
+    connect(effects, &EffectsHandler::showingDesktopChanged, this, [this](bool) {
+        scheduleRelayout();
+    });
     connect(effects, &EffectsHandler::currentActivityChanged, this, [this](const QString &) {
         scheduleRelayout();
     });
@@ -860,7 +864,9 @@ void ThumbnailBloomEffect::updateShields()
 
 bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
 {
-    if (w->isDeleted() || w->isMinimized() || w->isHidden() || !w->screen()) {
+    // "Show desktop" hides windows without minimising them, and a window that is
+    // not on screen must not get a thumbnail either.
+    if (w->isDeleted() || w->isMinimized() || w->isHidden() || w->isHiddenByShowDesktop() || !w->screen()) {
         return false;
     }
     if (!w->isOnCurrentDesktop() || !w->isOnCurrentActivity()) {
