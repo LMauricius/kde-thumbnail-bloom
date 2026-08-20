@@ -14,12 +14,18 @@ namespace ThumbnailBloom
 
 ThumbnailOverlay::ThumbnailOverlay()
 {
-    // Qt::Tool must not be used here: it is Qt::Popup | Qt::Dialog, and KWin
-    // turns any internal window carrying Qt::Popup into a grabbing popup
-    // (InternalWindow::hasPopupGrab()). PopupInputFilter then swallows every
-    // key event and every button press landing outside the overlay, which
-    // makes the whole session unclickable.
-    setFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus | Qt::BypassWindowManagerHint);
+    // The window type is load bearing, because KWin derives the behaviour of an
+    // internal window from the Qt flags:
+    //  - Qt::Tool is Qt::Popup | Qt::Dialog, and anything carrying Qt::Popup
+    //    becomes a grabbing popup (InternalWindow::hasPopupGrab()), after which
+    //    PopupInputFilter swallows every key event and every button press that
+    //    lands outside the overlay. The session becomes unusable.
+    //  - A plain Qt::Window makes the overlay a normal window: it then shows up
+    //    in the window list of every KWin script and in anything that walks the
+    //    stacking order looking for real windows.
+    // Qt::ToolTip is Qt::Popup | Qt::Sheet, and hasPopupGrab() excludes tooltips
+    // explicitly, so it gives input without a grab and stays out of the way.
+    setFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowDoesNotAcceptFocus | Qt::BypassWindowManagerHint);
 
     // The window must stay invisible: the thumbnail underneath is what the user
     // sees, so an alpha channel is requested and every pixel is cleared.
