@@ -21,6 +21,7 @@
 namespace ThumbnailBloom
 {
 
+class OverlayWindow;
 class ThumbnailOverlay;
 
 /*!
@@ -64,6 +65,7 @@ private:
         QRegion hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay;
+        std::unique_ptr<OverlayWindow> shield; //!< swallows the input the vacated real geometry would still get
     };
 
     // --- state handling ---
@@ -88,6 +90,8 @@ private:
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, const QRectF &rect) const;
     /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
+    /*! Puts a shield on the part of every bloomed window that would still take input. */
+    void updateShields();
 
     // --- window classification ---
 
@@ -97,7 +101,7 @@ private:
     bool isEligible(KWin::EffectWindow *w, const QSet<KWin::EffectWindow *> &parents) const;
     /*! Whether \a w covers its whole maximize area (fullscreen counts as maximized). */
     bool isMaximized(KWin::EffectWindow *w) const;
-    /*! Whether \a w is one of the effect's own click targets. */
+    /*! Whether \a w is one of the effect's own click targets or shields. */
     bool isOwnOverlay(KWin::EffectWindow *w) const;
     /*! Recomputes the area the system elements take away from the thumbnails. */
     void updateSystemRegion();

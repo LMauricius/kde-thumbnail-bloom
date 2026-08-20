@@ -8,11 +8,12 @@
 
 #include <QMouseEvent>
 #include <QPainter>
+#include <QWheelEvent>
 
 namespace ThumbnailBloom
 {
 
-ThumbnailOverlay::ThumbnailOverlay()
+OverlayWindow::OverlayWindow()
 {
     // The window type is load bearing, because KWin derives the behaviour of an
     // internal window from the Qt flags:
@@ -27,42 +28,59 @@ ThumbnailOverlay::ThumbnailOverlay()
     // explicitly, so it gives input without a grab and stays out of the way.
     setFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowDoesNotAcceptFocus | Qt::BypassWindowManagerHint);
 
-    // The window must stay invisible: the thumbnail underneath is what the user
+    // The window must stay invisible: whatever is underneath is what the user
     // sees, so an alpha channel is requested and every pixel is cleared.
     QSurfaceFormat format = requestedFormat();
     format.setAlphaBufferSize(8);
     setFormat(format);
 }
 
-ThumbnailOverlay::~ThumbnailOverlay() = default;
+OverlayWindow::~OverlayWindow() = default;
 
-
-void ThumbnailOverlay::paintEvent(QPaintEvent *event)
+void OverlayWindow::paintEvent(QPaintEvent *event)
 {
-    // Source mode clears instead of blending, so the thumbnail below stays visible.
+    // Source mode clears instead of blending, so what is below stays visible.
     QPainter painter(this);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
     painter.fillRect(event->rect(), Qt::transparent);
 }
 
-void ThumbnailOverlay::mouseMoveEvent(QMouseEvent *event)
+// Accepting is what keeps an event from reaching the window below: KWin hands it
+// to the internal window first and only passes it on to the client under the
+// pointer if it comes back ignored. Without this the window that happens to sit
+// behind lights up its own hover feedback, scrolls, or gets raised.
+
+void OverlayWindow::mouseMoveEvent(QMouseEvent *event)
 {
-    // Accepting is what keeps the motion from reaching the window below: KWin
-    // hands the event to the internal window first and only passes it on to the
-    // client under the pointer if it comes back ignored. Without this the window
-    // that happens to sit behind the thumbnail lights up its own hover feedback.
     event->accept();
 }
 
+void OverlayWindow::mousePressEvent(QMouseEvent *event)
+{
+    event->accept();
+}
+
+void OverlayWindow::mouseReleaseEvent(QMouseEvent *event)
+{
+    event->accept();
+}
+
+void OverlayWindow::wheelEvent(QWheelEvent *event)
+{
+    event->accept();
+}
+
+ThumbnailOverlay::ThumbnailOverlay() = default;
+
+ThumbnailOverlay::~ThumbnailOverlay() = default;
+
 void ThumbnailOverlay::mousePressEvent(QMouseEvent *event)
 {
-    if (event->button() != Qt::LeftButton) {
-        event->ignore();
-        return;
-    }
-
+    // Other buttons are still swallowed, they just do not activate anything.
     event->accept();
-    Q_EMIT clicked();
+    if (event->button() == Qt::LeftButton) {
+        Q_EMIT clicked();
+    }
 }
 
 } // namespace ThumbnailBloom

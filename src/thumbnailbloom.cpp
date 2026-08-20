@@ -133,6 +133,22 @@ static bool isSystemElement(EffectWindow *w)
         || w->isLockScreen();
 }
 
+/*!
+ * Returns whether \a w can take pointer input where it really is.
+ *
+ * Everything mapped on the current desktop qualifies, docks and popups included:
+ * this is used to work out what a shield must not cover, so it has to err on the
+ * side of leaving input alone.
+ */
+static bool isInputTarget(EffectWindow *w)
+{
+    if (w->isDeleted() || !w->isVisible() || w->isMinimized() || w->isHidden()) {
+        return false;
+    }
+
+    return w->isOnCurrentDesktop() && w->isOnCurrentActivity();
+}
+
 /*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
 static bool sameRect(const QRectF &a, const QRectF &b)
 {
@@ -310,6 +326,10 @@ void ThumbnailBloomEffect::relayout()
         }
     }
 
+    // Needs the final click targets of every thumbnail, so it comes after the
+    // whole layout rather than per window.
+    updateShields();
+
     // The click targets have just been placed and moved, so the pointer can end
     // up on another thumbnail without having moved at all.
     updateHover(effects->cursorPos());
@@ -415,10 +435,14 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
     // its signals are cut right away so a click in the meantime cannot reach
     // the window pointer that is about to go stale.
     auto node = m_states.extract(w);
-    if (!node.empty() && node.mapped().overlay) {
-        ThumbnailOverlay *overlay = node.mapped().overlay.release();
-        overlay->disconnect();
-        overlay->deleteLater();
+    if (!node.empty()) {
+        for (OverlayWindow *window : {static_cast<OverlayWindow *>(node.mapped().overlay.release()),
+                                      node.mapped().shield.release()}) {
+            if (window) {
+                window->disconnect();
+                window->deleteLater();
+            }
+        }
     }
     effects->addRepaintFull();
 }
@@ -461,6 +485,73 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     state.overlay->show();
 }
 
+void ThumbnailBloomEffect::updateShields()
+{
+    // Only ever reached from the relayout pass: showing and hiding internal
+    // windows is not survivable under pointer dispatch or under the effect chain.
+    //
+    // A bloomed window is painted somewhere else but keeps its real input
+    // geometry, so hovering or clicking the area it vacated would still reach it.
+    // A shield is an internal window put on that area: KWin hit tests internal
+    // windows above the ordinary ones, so the pointer focus lands on the shield
+    // and the window below never sees an enter event either. Only clicks on the
+    // thumbnail activate a bloomed window.
+
+    // Whatever the thumbnails claim stays theirs; the shields are internal
+    // windows too, and two of those on the same pixel have no defined order.
+    QRegion thumbnails;
+    for (const auto &[w, state] : m_states) {
+        thumbnails += state.hitRegion;
+    }
+
+    // Walking the stack top down keeps a shield inside the area where its window
+    // really is the topmost input target: everything above it has been added to
+    // `covered` by the time the window is reached. Covering a window that lies
+    // over a bloomed one would take away input that rightfully belongs to it.
+    QRegion covered = m_systemRegion;
+    QSet<EffectWindow *> shielded;
+    const QList<EffectWindow *> stack = effects->stackingOrder();
+    for (auto it = stack.crbegin(); it != stack.crend(); ++it) {
+        EffectWindow *w = *it;
+        if (!isInputTarget(w) || isOwnOverlay(w)) {
+            continue;
+        }
+
+        const QRect frame = w->frameGeometry().toAlignedRect();
+        const auto sit = m_states.find(w);
+
+        // A non empty hit region is exactly what marks a window as bloomed: it is
+        // set by updateOverlay() and cleared as soon as the window travels home.
+        if (sit != m_states.end() && !sit->second.hitRegion.isEmpty()) {
+            BloomState &state = sit->second;
+            const QRegion exposed = QRegion(frame) - covered - thumbnails;
+            if (!exposed.isEmpty()) {
+                if (!state.shield) {
+                    state.shield = std::make_unique<OverlayWindow>();
+                }
+                const QRect bounds = exposed.boundingRect();
+                state.shield->setGeometry(bounds);
+                state.shield->setMask(exposed.translated(-bounds.topLeft()));
+                state.shield->show();
+                shielded.insert(w);
+            }
+        }
+
+        // The bloomed window takes part as well: it is shielded where it is
+        // exposed, so a window below must not claim that area either.
+        covered += frame;
+    }
+
+    // Everything else drops its shield, the windows the loop never reached
+    // included: a window that got hidden or unbloomed must take its own input
+    // back immediately.
+    for (auto &[w, state] : m_states) {
+        if (state.shield && !shielded.contains(w)) {
+            state.shield->hide();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Window classification
 // ---------------------------------------------------------------------------
@@ -491,7 +582,7 @@ bool ThumbnailBloomEffect::isOwnOverlay(EffectWindow *w) const
     }
 
     return std::any_of(m_states.begin(), m_states.end(), [handle](const auto &entry) {
-        return entry.second.overlay.get() == handle;
+        return entry.second.overlay.get() == handle || entry.second.shield.get() == handle;
     });
 }
 
