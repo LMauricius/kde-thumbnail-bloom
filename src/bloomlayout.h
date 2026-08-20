@@ -21,6 +21,7 @@ struct LayoutWindow
     void *id = nullptr; //!< opaque handle, handed back in the resulting Placement
     QRectF geometry; //!< where the window currently is on screen
     bool eligible = false; //!< whether this window may be turned into a thumbnail
+    bool reserved = false; //!< whether no thumbnail may ever be placed over this window
 };
 
 /*!
@@ -52,10 +53,12 @@ struct Placement
  * A window is turned into a thumbnail when something above it covers a part of
  * it. The thumbnail is shrunk to LayoutOptions::initialScale and put in the
  * free space nearest to where the window sits; if nothing fits, it keeps
- * shrinking down to LayoutOptions::minScale.
+ * shrinking down to LayoutOptions::minScale. The area of a
+ * LayoutWindow::reserved window is kept free whatever its place in the stack.
  *
- * Returns one Placement per bloomed window; windows that stay untouched are
- * absent from the result.
+ * Returns one Placement per bloomed window; windows that stay untouched and
+ * windows the smallest thumbnail still finds no room for are absent from the
+ * result.
  */
 QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options);
 

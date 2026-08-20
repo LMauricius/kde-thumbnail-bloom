@@ -82,19 +82,6 @@ static std::optional<QRect> nearestFreeSlot(const QRegion &free, const QSize &si
     return best;
 }
 
-/*!
- * Last resort placement: keeps the thumbnail at \a size next to its window and
- * only makes sure it stays on \a workArea.
- */
-static QRect clampedToWorkArea(const QSize &size, const QPointF &desiredCenter, const QRect &workArea)
-{
-    QRect rect(QPoint(0, 0), size);
-    rect.moveCenter(QPoint(std::lround(desiredCenter.x()), std::lround(desiredCenter.y())));
-    rect.moveLeft(clamped(rect.left(), workArea.left(), std::max(workArea.left(), workArea.right() + 1 - size.width())));
-    rect.moveTop(clamped(rect.top(), workArea.top(), std::max(workArea.top(), workArea.bottom() + 1 - size.height())));
-    return rect;
-}
-
 // ---------------------------------------------------------------------------
 // Layout pass
 // ---------------------------------------------------------------------------
@@ -108,6 +95,16 @@ QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &w
     // above it plus the thumbnails already handed out.
     QRegion occupied;
     QRegion blocked;
+
+    // Windows whose area must stay free no matter where they sit in the stack,
+    // the active one above all: a thumbnail placed there would cover the very
+    // window being worked in. Seeded before the walk so that even a thumbnail
+    // of a window stacked above them keeps off.
+    for (const LayoutWindow &window : stack) {
+        if (window.reserved) {
+            blocked += grown(window.geometry.toAlignedRect(), options.margin);
+        }
+    }
 
     // Walk from the top of the stack downwards, so that by the time a window is
     // looked at, everything covering it has its final rectangle already.
@@ -137,11 +134,13 @@ QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &w
             }
         }
 
-        // Nothing fits anywhere: show the window at the smallest allowed size.
+        // Not even the smallest thumbnail fits: leave the window alone rather
+        // than drop it somewhere it would be in the way. It stays where it is
+        // and thus out of sight, under whatever covers it.
         if (!slot) {
-            const QSize size(std::max(1, int(std::lround(window.geometry.width() * options.minScale))),
-                             std::max(1, int(std::lround(window.geometry.height() * options.minScale))));
-            slot = clampedToWorkArea(size, desiredCenter, area);
+            occupied += geometry;
+            blocked += grown(geometry, options.margin);
+            continue;
         }
 
         placements.append(Placement{window.id, QRectF(*slot)});

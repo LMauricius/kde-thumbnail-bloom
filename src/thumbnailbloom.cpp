@@ -409,7 +409,8 @@ void ThumbnailBloomEffect::relayout()
         if (!isRelevant(w)) {
             continue;
         }
-        perScreen[w->screen()].append(LayoutWindow{w, QRectF(w->frameGeometry()), isEligible(w, parents)});
+        perScreen[w->screen()].append(
+            LayoutWindow{w, QRectF(w->frameGeometry()), isEligible(w, parents), w == effects->activeWindow()});
     }
 
     QSet<EffectWindow *> bloomed;
