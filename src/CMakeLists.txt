@@ -13,6 +13,7 @@ target_link_libraries(thumbnailbloom PRIVATE
     Qt6::Gui
     KF6::ConfigCore
     KF6::ConfigGui
+    KF6::ColorScheme
     KF6::CoreAddons
     KF6::I18n
 )

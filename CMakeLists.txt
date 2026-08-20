@@ -17,7 +17,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core DBus Gui Widgets)
-find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS Config ConfigWidgets CoreAddons I18n KCMUtils)
+find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS ColorScheme Config ConfigWidgets CoreAddons I18n KCMUtils)
 find_package(KWin REQUIRED)
 
 add_subdirectory(src)

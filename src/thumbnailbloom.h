@@ -41,6 +41,7 @@ public:
 
     void prePaintScreen(KWin::ScreenPrePaintData &data) override;
     void prePaintWindow(KWin::RenderView *view, KWin::EffectWindow *w, KWin::WindowPrePaintData &data) override;
+    void paintScreen(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, int mask, const KWin::Region &deviceRegion, KWin::LogicalOutput *screen) override;
     void paintWindow(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, KWin::EffectWindow *w, int mask, const KWin::Region &deviceRegion, KWin::WindowPaintData &data) override;
     void postPaintScreen() override;
 
@@ -54,9 +55,11 @@ private:
      */
     struct BloomState
     {
+        QRectF base; //!< rectangle the layout asked for, before any hover growth
         QRectF from; //!< rectangle the running animation started at
         QRectF to; //!< rectangle the animation ends at
         QRectF current; //!< rectangle used by the current frame
+        bool hovered = false; //!< whether the pointer is on the thumbnail
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay;
     };
@@ -67,10 +70,18 @@ private:
     void relayout();
     /*! Queues a relayout for the next event loop pass, coalescing bursts of changes. */
     void scheduleRelayout();
-    /*! Starts or retargets the animation of \a w towards \a target. */
-    void retarget(KWin::EffectWindow *w, const QRectF &target);
+    /*! Starts or retargets the animation of \a w towards \a base, grown if hovered. */
+    void retarget(KWin::EffectWindow *w, const QRectF &base);
+    /*! Marks the topmost settled thumbnail under \a pos as hovered, and the rest as not. */
+    void updateHover(const QPointF &pos);
+    /*! Marks the thumbnail of \a w as hovered or not and animates it accordingly. */
+    void setHovered(KWin::EffectWindow *w, bool hovered);
     /*! Drops \a w's state, hiding its click target right away. */
     void forget(KWin::EffectWindow *w);
+    /*! Applies the thumbnail transformation of \a state to \a data. */
+    void applyTransform(KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
+    /*! Draws the lifted thumbnail, if it has not been drawn in this pass yet. */
+    void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport);
     /*! Keeps the click target of \a w in sync with its thumbnail. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
 
@@ -92,6 +103,10 @@ private:
     QTimer m_relayoutTimer;
     std::chrono::milliseconds m_animationDuration;
     LayoutOptions m_layoutOptions;
+    KWin::Region m_paintRegion; //!< device region the current pass repaints
+    KWin::EffectWindow *m_liftedWindow = nullptr; //!< thumbnail drawn above the other windows
+    KWin::EffectWindow *m_liftAnchor = nullptr; //!< window it is drawn right after
+    bool m_liftPending = false; //!< whether it still has to be drawn in this pass
     bool m_skipKeepAbove = true;
     bool m_skipMaximized = true;
     bool m_skipParents = true;
