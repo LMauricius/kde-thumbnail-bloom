@@ -10,6 +10,7 @@
 
 #include <effect/effect.h>
 #include <effect/timeline.h>
+#include <input.h>
 
 #include <QRegion>
 #include <QRectF>
@@ -23,6 +24,45 @@ namespace ThumbnailBloom
 
 class OverlayWindow;
 class ThumbnailOverlay;
+
+/*!
+ * Swallows the pointer and touch input landing on the shields.
+ *
+ * A shield takes the pointer focus and the events KWin forwards to windows, but
+ * not everything goes through the focus: the window action filter (raise,
+ * activate, the mouse button commands) sits ahead of the internal windows in the
+ * input chain and works straight off the position, which is why a press on a
+ * shield can still act on the window underneath, differently per button. This
+ * filter is installed ahead of that one and drops everything inside the shielded
+ * region, so no button reaches a bloomed window where it is not painted.
+ *
+ * It is deliberately behind the popup and move/resize filters: a click on a
+ * shield must still close an open menu and finish a running move.
+ */
+class ShieldFilter : public KWin::InputEventFilter
+{
+public:
+    ShieldFilter();
+
+    /*!
+     * Sets the regions, in logical screen coordinates, that swallow input.
+     *
+     * \a shields drops everything; \a thumbnails drops everything but the left
+     * button, which has to reach the click target underneath it.
+     */
+    void setRegions(const QRegion &shields, const QRegion &thumbnails);
+
+    bool pointerButton(KWin::PointerButtonEvent *event) override;
+    bool pointerAxis(KWin::PointerAxisEvent *event) override;
+    bool touchDown(KWin::TouchDownEvent *event) override;
+    bool touchMotion(KWin::TouchMotionEvent *event) override;
+    bool touchUp(KWin::TouchUpEvent *event) override;
+
+private:
+    QRegion m_shields;
+    QRegion m_thumbnails;
+    QSet<qint32> m_swallowedTouches; //!< touch points that went down on a shield
+};
 
 /*!
  * Shows covered inactive windows as thumbnails on the nearest free space.
@@ -116,6 +156,7 @@ private:
     std::chrono::milliseconds m_animationDuration;
     LayoutOptions m_layoutOptions;
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
+    ShieldFilter m_shieldFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints
     KWin::EffectWindow *m_liftedWindow = nullptr; //!< thumbnail drawn above the other windows
     KWin::EffectWindow *m_liftAnchor = nullptr; //!< window it is drawn right after

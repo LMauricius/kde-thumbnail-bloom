@@ -14,6 +14,7 @@
 #include <core/renderviewport.h>
 #include <cursor.h>
 #include <effect/effecthandler.h>
+#include <input_event.h>
 #include <effect/effectwindow.h>
 #include <opengl/glutils.h>
 
@@ -158,12 +159,72 @@ static bool sameRect(const QRectF &a, const QRectF &b)
 }
 
 // ---------------------------------------------------------------------------
+// Input filter
+// ---------------------------------------------------------------------------
+
+ShieldFilter::ShieldFilter()
+    : InputEventFilter(InputFilterOrder::Decoration)
+{
+}
+
+void ShieldFilter::setRegions(const QRegion &shields, const QRegion &thumbnails)
+{
+    m_shields = shields;
+    m_thumbnails = thumbnails;
+}
+
+bool ShieldFilter::pointerButton(PointerButtonEvent *event)
+{
+    const QPoint pos = event->position.toPoint();
+    if (m_shields.contains(pos)) {
+        return true;
+    }
+
+    // A thumbnail belongs to its window, not to whatever it is painted over, so
+    // the buttons that do not activate it are dropped rather than handed to the
+    // window below. The left button is let through: the click target is an
+    // internal window and only gets the press if no earlier filter takes it.
+    return event->button != Qt::LeftButton && m_thumbnails.contains(pos);
+}
+
+bool ShieldFilter::pointerAxis(PointerAxisEvent *event)
+{
+    const QPoint pos = event->position.toPoint();
+    return m_shields.contains(pos) || m_thumbnails.contains(pos);
+}
+
+bool ShieldFilter::touchDown(TouchDownEvent *event)
+{
+    if (!m_shields.contains(event->pos.toPoint())) {
+        return false;
+    }
+
+    // The rest of the sequence belongs to the swallowed press, wherever it
+    // travels: letting the motion or the release through would hand a half
+    // sequence to a window that never saw its beginning.
+    m_swallowedTouches.insert(event->id);
+    return true;
+}
+
+bool ShieldFilter::touchMotion(TouchMotionEvent *event)
+{
+    return m_swallowedTouches.contains(event->id);
+}
+
+bool ShieldFilter::touchUp(TouchUpEvent *event)
+{
+    return m_swallowedTouches.remove(event->id);
+}
+
+// ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 
 ThumbnailBloomEffect::ThumbnailBloomEffect()
     : m_animationDuration(250)
 {
+    input()->installInputEventFilter(&m_shieldFilter);
+
     // Changes tend to arrive in bursts (a raise is a stacking change plus an
     // activation plus a geometry change), so they only mark the layout dirty.
     m_relayoutTimer.setSingleShot(true);
@@ -509,6 +570,7 @@ void ThumbnailBloomEffect::updateShields()
     // `covered` by the time the window is reached. Covering a window that lies
     // over a bloomed one would take away input that rightfully belongs to it.
     QRegion covered = m_systemRegion;
+    QRegion shieldRegion;
     QSet<EffectWindow *> shielded;
     const QList<EffectWindow *> stack = effects->stackingOrder();
     for (auto it = stack.crbegin(); it != stack.crend(); ++it) {
@@ -534,6 +596,7 @@ void ThumbnailBloomEffect::updateShields()
                 state.shield->setMask(exposed.translated(-bounds.topLeft()));
                 state.shield->show();
                 shielded.insert(w);
+                shieldRegion += exposed;
             }
         }
 
@@ -550,6 +613,8 @@ void ThumbnailBloomEffect::updateShields()
             state.shield->hide();
         }
     }
+
+    m_shieldFilter.setRegions(shieldRegion, thumbnails);
 }
 
 // ---------------------------------------------------------------------------
