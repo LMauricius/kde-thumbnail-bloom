@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <optional>
+#include <vector>
 
 namespace ThumbnailBloom
 {
@@ -83,41 +84,84 @@ static std::optional<QRect> nearestFreeSlot(const QRegion &free, const QSize &si
 }
 
 // ---------------------------------------------------------------------------
+// Selection pass
+// ---------------------------------------------------------------------------
+
+/*!
+ * Picks the windows that get a thumbnail, as a flag per entry of \a stack.
+ *
+ * Two rules, in order: anything sharing space with a reserved window is in the
+ * way of the window being worked in, and anything else is only worth moving
+ * when a window that stays put hides a part of it.
+ */
+static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack)
+{
+    std::vector<bool> bloomed(stack.size(), false);
+
+    // Rule one: overlapping a reserved window, whatever the stacking says. A
+    // window above the active one hides just as much of it as one below.
+    QRegion reserved;
+    for (const LayoutWindow &window : stack) {
+        if (window.reserved) {
+            reserved += window.geometry.toAlignedRect();
+        }
+    }
+    for (int i = 0; i < stack.size(); ++i) {
+        if (stack[i].eligible && !stack[i].reserved && reserved.intersects(stack[i].geometry.toAlignedRect())) {
+            bloomed[i] = true;
+        }
+    }
+
+    // Rule two: walk from the top down keeping the windows that stay where they
+    // are, and bloom whatever they hide a part of. Windows picked by rule one
+    // are leaving, so they hide nothing and are left out of the running region;
+    // that is what stops one thumbnail from dragging the whole stack under it
+    // along with it.
+    QRegion cover;
+    for (int i = stack.size() - 1; i >= 0; --i) {
+        if (bloomed[i]) {
+            continue;
+        }
+        const QRect geometry = stack[i].geometry.toAlignedRect();
+        if (stack[i].eligible && cover.intersects(geometry)) {
+            bloomed[i] = true;
+            continue;
+        }
+        cover += geometry;
+    }
+
+    return bloomed;
+}
+
+// ---------------------------------------------------------------------------
 // Layout pass
 // ---------------------------------------------------------------------------
 
 QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
 {
     const QRect area = workArea.toAlignedRect();
+    const std::vector<bool> bloomed = selectBloomed(stack);
     QList<Placement> placements;
 
-    // Everything that a window further down may not be placed on: the windows
-    // above it plus the thumbnails already handed out.
-    QRegion occupied;
+    // Everything a thumbnail may not be placed on: every window that stays put,
+    // plus the thumbnails already handed out. Stacking has no say in the first
+    // half, so it is seeded whole before the walk: a thumbnail dropped on a
+    // window below it in the stack would still be covering that window.
     QRegion blocked;
-
-    // Windows whose area must stay free no matter where they sit in the stack,
-    // the active one above all: a thumbnail placed there would cover the very
-    // window being worked in. Seeded before the walk so that even a thumbnail
-    // of a window stacked above them keeps off.
-    for (const LayoutWindow &window : stack) {
-        if (window.reserved) {
-            blocked += grown(window.geometry.toAlignedRect(), options.margin);
+    for (int i = 0; i < stack.size(); ++i) {
+        if (!bloomed[i]) {
+            blocked += grown(stack[i].geometry.toAlignedRect(), options.margin);
         }
     }
 
-    // Walk from the top of the stack downwards, so that by the time a window is
-    // looked at, everything covering it has its final rectangle already.
+    // Walk from the top of the stack downwards, so that the thumbnails nearer
+    // the top get the pick of the free space.
     for (int i = stack.size() - 1; i >= 0; --i) {
-        const LayoutWindow &window = stack[i];
-        const QRect geometry = window.geometry.toAlignedRect();
-
-        const bool overlapped = occupied.intersects(geometry);
-        if (!window.eligible || !overlapped) {
-            occupied += geometry;
-            blocked += grown(geometry, options.margin);
+        if (!bloomed[i]) {
             continue;
         }
+        const LayoutWindow &window = stack[i];
+        const QRect geometry = window.geometry.toAlignedRect();
 
         // Shrink first, move second: try the configured thumbnail size and only
         // shrink further when that size finds no free spot.
@@ -138,13 +182,11 @@ QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &w
         // than drop it somewhere it would be in the way. It stays where it is
         // and thus out of sight, under whatever covers it.
         if (!slot) {
-            occupied += geometry;
             blocked += grown(geometry, options.margin);
             continue;
         }
 
-        placements.append(Placement{window.id, QRectF(*slot)});
-        occupied += *slot;
+            placements.append(Placement{window.id, QRectF(*slot)});
         blocked += grown(*slot, options.margin);
     }
 

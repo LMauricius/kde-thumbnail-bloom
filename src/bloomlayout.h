@@ -50,11 +50,18 @@ struct Placement
  * \a stack holds the windows of that screen in stacking order, bottom-most
  * first. \a workArea is the area thumbnails may use.
  *
- * A window is turned into a thumbnail when something above it covers a part of
- * it. The thumbnail is shrunk to LayoutOptions::initialScale and put in the
+ * Selection comes first, placement second, so that the set of thumbnails does
+ * not depend on where the previous ones happened to land. A window is turned
+ * into a thumbnail when it overlaps a LayoutWindow::reserved window (wherever
+ * the two sit in the stack), or when a window above it that is staying put
+ * covers a part of it. Windows that are themselves becoming thumbnails cover
+ * nothing, so one thumbnail does not pull the windows under it along.
+ *
+ * The thumbnail is then shrunk to LayoutOptions::initialScale and put in the
  * free space nearest to where the window sits; if nothing fits, it keeps
- * shrinking down to LayoutOptions::minScale. The area of a
- * LayoutWindow::reserved window is kept free whatever its place in the stack.
+ * shrinking down to LayoutOptions::minScale. Every window that is staying put
+ * is kept clear, wherever it sits in the stack, so a thumbnail never lands on
+ * a window that was visible without it.
  *
  * Returns one Placement per bloomed window; windows that stay untouched and
  * windows the smallest thumbnail still finds no room for are absent from the
