@@ -109,6 +109,30 @@ static QColor outlineColor()
     return KColorScheme(QPalette::Active, KColorScheme::View).decoration(KColorScheme::FocusColor).color();
 }
 
+/*!
+ * Returns whether \a w is a system element: something KWin paints in a layer of
+ * its own above the ordinary windows (panels, popups, applet popups, menus,
+ * notifications, on screen displays) and that never takes part in the layout, so
+ * a thumbnail can end up underneath it.
+ */
+static bool isSystemElement(EffectWindow *w)
+{
+    if (w->isDeleted() || !w->isVisible() || w->isMinimized() || w->isHidden()) {
+        return false;
+    }
+    if (!w->isOnCurrentDesktop() || !w->isOnCurrentActivity()) {
+        return false;
+    }
+
+    // Internal windows are KWin's own surfaces (its on screen displays and the
+    // like); the effect's click targets are internal too and are filtered out by
+    // the caller, which is the only place that can tell them apart.
+    return w->internalWindow() || w->isDock() || w->isPopupWindow() || w->isPopupMenu() || w->isDropdownMenu()
+        || w->isMenu() || w->isAppletPopup() || w->isNotification() || w->isCriticalNotification()
+        || w->isOnScreenDisplay() || w->isTooltip() || w->isComboBox() || w->isDNDIcon() || w->isSplash()
+        || w->isLockScreen();
+}
+
 /*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
 static bool sameRect(const QRectF &a, const QRectF &b)
 {
@@ -233,6 +257,10 @@ void ThumbnailBloomEffect::relayout()
 {
     const QList<EffectWindow *> stack = effects->stackingOrder();
 
+    // Placing the click targets needs to know what covers them, so this comes
+    // first.
+    updateSystemRegion();
+
     // Windows something else is transient for, needed by the "skip parents" setting.
     QSet<EffectWindow *> parents;
     for (EffectWindow *w : stack) {
@@ -315,16 +343,18 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
         return state.overlay && state.overlay->isVisible();
     };
 
-    // The hit test is against the resting rectangle, never the grown one: the
-    // pointer keeps the thumbnail enlarged only while it stays inside the area
-    // the thumbnail occupies when it is not hovered. Testing the grown rectangle
-    // instead would make the thumbnail hold on to the pointer over an area it
-    // only covers because of that very pointer.
+    // The hit test is against the exposed part of the resting rectangle, never
+    // the grown one: the pointer keeps the thumbnail enlarged only while it
+    // stays inside the area the thumbnail occupies when it is not hovered.
+    // Testing the grown rectangle instead would make the thumbnail hold on to
+    // the pointer over an area it only covers because of that very pointer.
+    // What a panel or a popup covers belongs to that panel or popup, so it is
+    // cut out of the region and hovering there does nothing.
     // At most one thumbnail is hovered, and the hovered one keeps it as long as
     // the pointer stays on it.
     EffectWindow *hovered = nullptr;
     for (const auto &[w, state] : m_states) {
-        if (targetable(state) && state.base.contains(pos) && (!hovered || state.hovered)) {
+        if (targetable(state) && state.hitRegion.contains(pos.toPoint()) && (!hovered || state.hovered)) {
             hovered = w;
         }
     }
@@ -376,7 +406,16 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     //
     // A window travelling back to its own geometry stops being a thumbnail, so
     // it loses its click target right away rather than at the end of the trip.
-    if (sameRect(state.base, QRectF(w->frameGeometry()))) {
+    // The click target only claims what is actually visible of the thumbnail.
+    // KWin hit tests an internal window against the mask of its QWindow, so
+    // cutting the system elements out of that mask hands their own area back to
+    // them: the panel keeps its hover feedback and its clicks, and so does every
+    // popup that opens over a thumbnail.
+    const QRect rect = state.base.toAlignedRect();
+    state.hitRegion = QRegion(rect) - m_systemRegion;
+
+    if (sameRect(state.base, QRectF(w->frameGeometry())) || state.hitRegion.isEmpty()) {
+        state.hitRegion = QRegion();
         if (state.overlay) {
             state.overlay->hide();
         }
@@ -392,7 +431,8 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
 
     // The resting rectangle, never the current one: the click target must not
     // travel with the animation, and never grows with the hover either.
-    state.overlay->setGeometry(state.base.toAlignedRect());
+    state.overlay->setGeometry(rect);
+    state.overlay->setMask(state.hitRegion.translated(-rect.topLeft()));
     state.overlay->show();
 }
 
@@ -416,6 +456,31 @@ bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
     }
 
     return w->isNormalWindow() || w->isDialog();
+}
+
+bool ThumbnailBloomEffect::isOwnOverlay(EffectWindow *w) const
+{
+    const QWindow *handle = w->internalWindow();
+    if (!handle) {
+        return false;
+    }
+
+    return std::any_of(m_states.begin(), m_states.end(), [handle](const auto &entry) {
+        return entry.second.overlay.get() == handle;
+    });
+}
+
+void ThumbnailBloomEffect::updateSystemRegion()
+{
+    m_systemRegion = QRegion();
+    for (EffectWindow *w : effects->stackingOrder()) {
+        // Stacking is not consulted: system elements live in layers above the
+        // ordinary windows, and a thumbnail is painted in the layer of the
+        // window it belongs to, so one always covers the other.
+        if (isSystemElement(w) && !isOwnOverlay(w)) {
+            m_systemRegion += w->frameGeometry().toAlignedRect();
+        }
+    }
 }
 
 bool ThumbnailBloomEffect::isEligible(EffectWindow *w, const QSet<EffectWindow *> &parents) const

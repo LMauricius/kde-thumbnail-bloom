@@ -11,6 +11,7 @@
 #include <effect/effect.h>
 #include <effect/timeline.h>
 
+#include <QRegion>
 #include <QRectF>
 #include <QTimer>
 
@@ -60,6 +61,7 @@ private:
         QRectF to; //!< rectangle the animation ends at
         QRectF current; //!< rectangle used by the current frame
         bool hovered = false; //!< whether the pointer is on the thumbnail
+        QRegion hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay;
     };
@@ -72,7 +74,7 @@ private:
     void scheduleRelayout();
     /*! Starts or retargets the animation of \a w towards \a base, grown if hovered. */
     void retarget(KWin::EffectWindow *w, const QRectF &base);
-    /*! Marks the topmost thumbnail whose resting rectangle holds \a pos as hovered, and the rest as not. */
+    /*! Marks the topmost thumbnail whose exposed area holds \a pos as hovered, and the rest as not. */
     void updateHover(const QPointF &pos);
     /*! Marks the thumbnail of \a w as hovered or not and animates it accordingly. */
     void setHovered(KWin::EffectWindow *w, bool hovered);
@@ -95,6 +97,10 @@ private:
     bool isEligible(KWin::EffectWindow *w, const QSet<KWin::EffectWindow *> &parents) const;
     /*! Whether \a w covers its whole maximize area (fullscreen counts as maximized). */
     bool isMaximized(KWin::EffectWindow *w) const;
+    /*! Whether \a w is one of the effect's own click targets. */
+    bool isOwnOverlay(KWin::EffectWindow *w) const;
+    /*! Recomputes the area the system elements take away from the thumbnails. */
+    void updateSystemRegion();
 
     // --- connections ---
 
@@ -105,6 +111,7 @@ private:
     QTimer m_relayoutTimer;
     std::chrono::milliseconds m_animationDuration;
     LayoutOptions m_layoutOptions;
+    QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
     KWin::Region m_paintRegion; //!< device region the current pass repaints
     KWin::EffectWindow *m_liftedWindow = nullptr; //!< thumbnail drawn above the other windows
     KWin::EffectWindow *m_liftAnchor = nullptr; //!< window it is drawn right after
