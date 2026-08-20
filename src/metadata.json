@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "mauriciosmit100@gmail.com",
+                "Name": "Mauricio S."
+            }
+        ],
+        "Category": "Window Management",
+        "Description": "Shrinks inactive windows that are covered by others and moves them to the nearest free space",
+        "EnabledByDefault": false,
+        "Icon": "preferences-system-windows-effect-thumbnailbloom",
+        "License": "GPL",
+        "Name": "Thumbnail Bloom"
+    },
+    "X-KDE-ConfigModule": "kwin_thumbnailbloom_config"
+}

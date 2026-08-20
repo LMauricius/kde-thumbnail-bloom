@@ -1,0 +1,5 @@
+File=thumbnailbloomconfig.kcfg
+ClassName=ThumbnailBloomConfig
+NameSpace=ThumbnailBloom
+Singleton=true
+Mutators=true

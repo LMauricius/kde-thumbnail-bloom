@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                          http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+    <kcfgfile name="kwinrc"/>
+    <group name="Effect-thumbnailbloom">
+        <entry name="SkipKeepAbove" type="Bool">
+            <label>Skip windows that are kept above others</label>
+            <default>true</default>
+        </entry>
+        <entry name="SkipMaximized" type="Bool">
+            <label>Skip maximized windows</label>
+            <default>true</default>
+        </entry>
+        <entry name="SkipParents" type="Bool">
+            <label>Skip parent windows</label>
+            <default>true</default>
+        </entry>
+        <entry name="SkipChildren" type="Bool">
+            <label>Skip child windows</label>
+            <default>false</default>
+        </entry>
+        <entry name="InitialSize" type="Int">
+            <label>Initial thumbnail size, in percent of the window size</label>
+            <default>50</default>
+            <min>10</min>
+            <max>100</max>
+        </entry>
+        <entry name="MinimumSize" type="Int">
+            <label>Minimum thumbnail size, in percent of the window size</label>
+            <default>15</default>
+            <min>5</min>
+            <max>100</max>
+        </entry>
+    </group>
+</kcfg>
