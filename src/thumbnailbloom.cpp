@@ -8,10 +8,16 @@
 #include "thumbnailbloomconfig.h"
 #include "thumbnailoverlay.h"
 
+#include <core/colorspace.h>
 #include <core/output.h>
+#include <core/rendertarget.h>
+#include <core/renderviewport.h>
 #include <cursor.h>
 #include <effect/effecthandler.h>
 #include <effect/effectwindow.h>
+#include <opengl/glutils.h>
+
+#include <KColorScheme>
 
 #include <QHash>
 #include <QSet>
@@ -81,6 +87,26 @@ static QRectF thumbnailBounds(EffectWindow *w, const QRectF &rect)
                   rect.y() + (expanded.y() - natural.y()) * scaleY,
                   expanded.width() * scaleX,
                   expanded.height() * scaleY);
+}
+
+//! Width of the hover outline, in logical pixels.
+constexpr qreal outlineWidth = 2.0;
+
+/*! Returns the two triangles covering \a rect, appended to \a vertices. */
+static void appendQuad(std::vector<QVector2D> &vertices, const QRectF &rect)
+{
+    const QVector2D topLeft(rect.left(), rect.top());
+    const QVector2D topRight(rect.right(), rect.top());
+    const QVector2D bottomLeft(rect.left(), rect.bottom());
+    const QVector2D bottomRight(rect.right(), rect.bottom());
+    vertices.insert(vertices.end(), {topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight});
+}
+
+/*! Returns the outline colour of the current colour scheme. */
+static QColor outlineColor()
+{
+    // Read on every use: the colour scheme can change while the effect runs.
+    return KColorScheme(QPalette::Active, KColorScheme::View).decoration(KColorScheme::FocusColor).color();
 }
 
 /*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
@@ -320,9 +346,6 @@ void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
     if (hovered) {
         m_liftedWindow = w;
     }
-    if (it->second.overlay) {
-        it->second.overlay->setHovered(hovered);
-    }
 
     // Never retarget from here. This runs either inside KWin's pointer dispatch
     // (through the cursor position signal) or inside the paint pass, and
@@ -352,7 +375,6 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
 
     const bool wasVisible = state.overlay->isVisible();
     const QRect geometry = state.current.toAlignedRect();
-    state.overlay->setHovered(state.hovered);
     state.overlay->setGeometry(geometry);
     state.overlay->show();
 
@@ -533,6 +555,10 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget, const R
 
     if (w == m_liftAnchor) {
         drawLifted(renderTarget, viewport);
+    } else if (w == m_liftedWindow && it != m_states.end()) {
+        // Nothing covers this thumbnail, so it was painted in place just now and
+        // only the outline is left to put on top of it.
+        drawOutline(renderTarget, viewport, it->second.current);
     }
 }
 
@@ -558,6 +584,45 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const Re
     applyTransform(m_liftedWindow, it->second, data);
     effects->drawWindow(renderTarget, viewport, m_liftedWindow,
                         PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
+
+    drawOutline(renderTarget, viewport, it->second.current);
+}
+
+void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const RenderViewport &viewport, const QRectF &rect) const
+{
+    if (!effects->isOpenGLCompositing() || rect.isEmpty()) {
+        return;
+    }
+
+    // Four quads laid inside the edges of the thumbnail, in logical screen
+    // coordinates: that is what the projection matrix of the viewport expects.
+    const QRectF inner = rect.adjusted(outlineWidth, outlineWidth, -outlineWidth, -outlineWidth);
+    std::vector<QVector2D> vertices;
+    vertices.reserve(24);
+    appendQuad(vertices, QRectF(rect.left(), rect.top(), rect.width(), outlineWidth));
+    appendQuad(vertices, QRectF(rect.left(), inner.bottom(), rect.width(), outlineWidth));
+    appendQuad(vertices, QRectF(rect.left(), inner.top(), outlineWidth, inner.height()));
+    appendQuad(vertices, QRectF(inner.right(), inner.top(), outlineWidth, inner.height()));
+
+    GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
+    vbo->reset();
+    vbo->setVertices(vertices);
+
+    ShaderBinder binder(ShaderTrait::UniformColor | ShaderTrait::TransformColorspace);
+    GLShader *shader = binder.shader();
+    shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, viewport.projectionMatrix());
+    shader->setUniform(GLShader::ColorUniform::Color, outlineColor());
+    shader->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
+
+    // The shader writes premultiplied alpha, and the state is left as it was
+    // found: everything painted after this expects to set up its own blending.
+    const bool blending = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    vbo->render(m_paintRegion, GL_TRIANGLES, true);
+    if (!blending) {
+        glDisable(GL_BLEND);
+    }
 }
 
 void ThumbnailBloomEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)

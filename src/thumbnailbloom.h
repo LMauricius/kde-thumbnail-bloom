@@ -82,6 +82,8 @@ private:
     void applyTransform(KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
     /*! Draws the lifted thumbnail, if it has not been drawn in this pass yet. */
     void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport);
+    /*! Draws the hover outline just inside \a rect, in logical screen coordinates. */
+    void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, const QRectF &rect) const;
     /*! Keeps the click target of \a w in sync with its thumbnail. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
 
