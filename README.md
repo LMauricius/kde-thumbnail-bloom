@@ -36,14 +36,14 @@ System Settings applies here too.
 
 Found under System Settings, Desktop Effects, next to the effect's entry.
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| Windows kept above others | skipped | Windows with "Keep above others" stay where they are. |
-| Maximized windows | skipped | Maximized and fullscreen windows stay where they are. |
-| Parent windows | skipped | Windows that own a dialog stay where they are. |
-| Child windows | not skipped | Dialogs and other transient windows may become thumbnails. |
-| Initial thumbnail size | 50% | Size a thumbnail is tried at first. |
-| Minimum thumbnail size | 15% | Smallest size the search may fall back to. |
+| Setting                   | Default     | Meaning                                                    |
+| ------------------------- | ----------- | ---------------------------------------------------------- |
+| Windows kept above others | skipped     | Windows with "Keep above others" stay where they are.      |
+| Maximized windows         | skipped     | Maximized and fullscreen windows stay where they are.      |
+| Parent windows            | skipped     | Windows that own a dialog stay where they are.             |
+| Child windows             | not skipped | Dialogs and other transient windows may become thumbnails. |
+| Initial thumbnail size    | 50%         | Size a thumbnail is tried at first.                        |
+| Minimum thumbnail size    | 15%         | Smallest size the search may fall back to.                 |
 
 The active window never becomes a thumbnail, and neither do panels, docks, menus or windows being
 moved or resized.
@@ -59,8 +59,25 @@ cmake --build build -j$(nproc)
 sudo cmake --install build
 ```
 
-Then enable "Thumbnail Bloom" in System Settings, Desktop Effects. After reinstalling a new build,
-restart the compositor so the plugin is reloaded:
+Then enable "Thumbnail Bloom" in System Settings, Desktop Effects.
+
+
+## Disabling/Reloading from terminal
+To disable the effect from terminal, run:
+
+```bash
+kwriteconfig6 --file kwinrc --group Plugins --key thumbnailbloomEnabled false
+qdbus6 org.kde.KWin /Effects unloadEffect thumbnailbloom
+qdbus6 org.kde.KWin /KWin reconfigure
+```
+
+A proper way to reload the effect:
+```bash
+qdbus6 org.kde.KWin /Effects unloadEffect thumbnailbloom
+qdbus6 org.kde.KWin /Effects loadEffect thumbnailbloom
+```
+
+If soft reloading doesn't work, restart the compositor so the plugin is reloaded:
 
 ```bash
 kwin_wayland --replace &   # or: kwin_x11 --replace &
