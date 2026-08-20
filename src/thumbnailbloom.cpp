@@ -518,6 +518,10 @@ void ThumbnailBloomEffect::relayout()
     // whole layout rather than per window.
     updateShields();
 
+    // Painting the lifted thumbnail over the other captions only leaves its own
+    // caption above it if its click target is the last one painted.
+    raiseLiftedOverlay();
+
     // The click targets have just been placed and moved, so the pointer can end
     // up on another thumbnail without having moved at all.
     updateHover(effects->cursorPos());
@@ -910,6 +914,57 @@ bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
     return w->isNormalWindow() || w->isDialog();
 }
 
+void ThumbnailBloomEffect::raiseLiftedOverlay()
+{
+    // Only ever reached from the relayout pass: restacking a window is no safer
+    // under input dispatch or the effect chain than hiding one.
+    if (!m_liftedWindow) {
+        return;
+    }
+    const auto it = m_states.find(m_liftedWindow);
+    if (it == m_states.end() || !it->second.overlay) {
+        return;
+    }
+    EffectWindow *overlay = effects->findWindow(it->second.overlay.get());
+    if (!overlay) {
+        return;
+    }
+
+    // Raised only when another click target is actually above it: the raise
+    // changes the stacking order, which schedules the next relayout, so an
+    // unconditional one would never stop.
+    bool above = false;
+    bool covered = false;
+    for (EffectWindow *w : effects->stackingOrder()) {
+        if (w == overlay) {
+            above = true;
+        } else if (above && isCaptionTarget(w)) {
+            covered = true;
+            break;
+        }
+    }
+    if (!covered) {
+        return;
+    }
+
+    if (Window *window = overlay->window()) {
+        Workspace::self()->raiseWindow(window);
+    }
+}
+
+bool ThumbnailBloomEffect::isCaptionTarget(EffectWindow *w) const
+{
+    const QWindow *handle = w->internalWindow();
+    if (!handle) {
+        return false;
+    }
+
+    // The shields paint nothing, so only the click targets are of interest.
+    return std::any_of(m_states.begin(), m_states.end(), [handle](const auto &entry) {
+        return entry.second.overlay.get() == handle;
+    });
+}
+
 bool ThumbnailBloomEffect::isOwnOverlay(EffectWindow *w) const
 {
     const QWindow *handle = w->internalWindow();
@@ -1025,13 +1080,26 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     // it, and not after the whole screen: everything painted later (the popup
     // layer the outlines live in, and the cursor) keeps painting over it.
     //
+    // The click targets count as covering windows here, even though they are
+    // above the whole stack rather than at a place in it: they are the surfaces
+    // the captions are painted on, and the thumbnail that grew over its
+    // neighbours has to cover their captions as well. Its own caption is faded
+    // out under the pointer, so nothing of it is lost by drawing over it.
+    //
     // Anchoring to a window the thumbnail overlaps also keeps the two in the
     // same repaint: a window that does not intersect the thumbnail may be left
     // out of a partial repaint, and the anchor has to be painted for the
     // thumbnail to be drawn at all.
     m_liftAnchor = nullptr;
     if (m_liftedWindow) {
-        const QRectF thumbnail = m_states.at(m_liftedWindow).current;
+        const BloomState &lifted = m_states.at(m_liftedWindow);
+        const QRectF thumbnail = lifted.current;
+
+        // Its own click target is the exception: it carries the caption of the
+        // lifted thumbnail, which fades out rather than being covered, and
+        // raiseLiftedOverlay() has put it above every other one so that it is
+        // still painted after the thumbnail has been stamped.
+        const EffectWindow *own = lifted.overlay ? effects->findWindow(lifted.overlay.get()) : nullptr;
 
         bool above = false;
         for (EffectWindow *w : effects->stackingOrder()) {
@@ -1039,7 +1107,8 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
                 // The stacking order runs bottom to top, so only what follows
                 // covers the thumbnail; anything below it is already covered.
                 above = true;
-            } else if (above && isRelevant(w) && w->frameGeometry().toRect().intersects(Rect(thumbnail.toAlignedRect()))) {
+            } else if (above && (isRelevant(w) || (isCaptionTarget(w) && w != own))
+                       && w->frameGeometry().toRect().intersects(Rect(thumbnail.toAlignedRect()))) {
                 m_liftAnchor = w;
             }
         }

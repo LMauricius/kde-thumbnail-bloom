@@ -192,6 +192,8 @@ private:
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, const QRectF &rect) const;
     /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
+    /*! Puts the click target of the lifted thumbnail above every other one, so its caption stays visible. */
+    void raiseLiftedOverlay();
     /*! Puts a shield on the part of every bloomed window that would still take input. */
     void updateShields();
 
@@ -205,6 +207,8 @@ private:
     bool isMaximized(KWin::EffectWindow *w) const;
     /*! Whether \a w is one of the effect's own click targets or shields. */
     bool isOwnOverlay(KWin::EffectWindow *w) const;
+    /*! Whether \a w is one of the effect's own click targets, the surfaces the captions are painted on. */
+    bool isCaptionTarget(KWin::EffectWindow *w) const;
     /*! Recomputes the area the system elements take away from the thumbnails. */
     void updateSystemRegion();
 

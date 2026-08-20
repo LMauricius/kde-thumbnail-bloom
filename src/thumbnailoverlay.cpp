@@ -10,11 +10,16 @@
 
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QImage>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QStyleHints>
 #include <QTouchEvent>
 #include <QWheelEvent>
+
+#include <algorithm>
+#include <functional>
+#include <vector>
 
 namespace ThumbnailBloom
 {
@@ -25,13 +30,18 @@ namespace ThumbnailBloom
 
 //! Fixed metrics of the caption, in logical pixels.
 constexpr qreal captionIconSize = 32.0;
-constexpr qreal captionIconGap = 4.0;
-constexpr qreal captionPaddingX = 8.0;
-constexpr qreal captionPaddingY = 3.0;
+constexpr qreal captionIconGap = 1.0;
+constexpr qreal captionPaddingX = 5.0;
+constexpr qreal captionPaddingY = 1.5;
 constexpr qreal captionRadius = 6.0;
 constexpr qreal captionMargin = 6.0;
 //! How opaque the plate behind the title is.
-constexpr qreal captionPlateAlpha = 0.55;
+constexpr qreal captionPlateAlpha = 0.45;
+//! How far the shadow reaches, how far it drops, and how dark it is.
+constexpr qreal iconShadowRadius = 4.0;
+constexpr qreal captionShadowRadius = 1.25;
+constexpr qreal captionShadowDrop = 0.3;
+constexpr qreal captionShadowAlpha = 0.75;
 
 /*! Returns the colour the caption text is written in. */
 static QColor captionTextColor()
@@ -40,64 +50,223 @@ static QColor captionTextColor()
     return KColorScheme(QPalette::Active, KColorScheme::Window).foreground().color();
 }
 
+/*! Returns the colour that reads behind \a textColor: black under a light text,
+ * white under a dark one. */
+static QColor captionPlateColor(const QColor &textColor) {
+  // Rec. 709 luminance.
+  const qreal luminance = 0.2126 * textColor.redF() +
+                          0.7152 * textColor.greenF() +
+                          0.0722 * textColor.blueF();
+  return luminance > 0.5 ? QColor(Qt::black) : QColor(Qt::white);
+}
+
+/*! Returns the box radius the three blur passes of a shadow of \a radius device
+ * pixels use. */
+static int boxRadius(qreal radius) {
+  // Three box passes of half the radius add up to about a Gaussian of it.
+  return std::max(1, qRound(radius / 2.0));
+}
+
 /*!
- * Draws \a icon above \a title with \a painter, at the bottom of \a area.
+ * Blurs \a image with one box pass of \a radius, along the rows or the columns.
  *
- * The icon sits free, and only the title gets a plate behind it, black or white
- * depending on which one the text colour can be read against. Nothing is drawn
- * at all when the area is too small to hold the result.
+ * A running sum per channel, so the cost does not grow with the radius. Edge
+ * pixels are repeated rather than treated as transparent, which is harmless
+ * here: every image passed in is padded with enough empty space for the whole
+ * kernel, so the repeated pixels are empty ones.
  */
-static void paintCaption(QPainter &painter, const QRectF &area, const QIcon &icon, const QString &title)
-{
-    const QRectF inner = area.adjusted(captionMargin, captionMargin, -captionMargin, -captionMargin);
-    if (inner.isEmpty()) {
-        return;
+static void boxBlurPass(QImage &image, int radius, bool horizontal) {
+  const int outer = horizontal ? image.height() : image.width();
+  const int inner = horizontal ? image.width() : image.height();
+  const int window = 2 * radius + 1;
+  if (inner <= 0 || outer <= 0) {
+    return;
+  }
+
+  std::vector<QRgb> line(inner);
+  for (int o = 0; o < outer; ++o) {
+    // The line is copied out first, because the pass writes over its input.
+    for (int i = 0; i < inner; ++i) {
+      line[i] = horizontal
+                    ? reinterpret_cast<const QRgb *>(image.constScanLine(o))[i]
+                    : reinterpret_cast<const QRgb *>(image.constScanLine(i))[o];
     }
 
-    const QFont font = QGuiApplication::font();
-    const QFontMetricsF metrics(font);
-
-    // Both parts are optional, and either one missing simply takes its band out.
-    const bool hasIcon = !icon.isNull();
-    const qreal iconHeight = hasIcon ? captionIconSize : 0.0;
-
-    QString text;
-    qreal plateWidth = 0.0;
-    qreal plateHeight = 0.0;
-    if (!title.isEmpty() && inner.width() > 2 * captionPaddingX) {
-        text = metrics.elidedText(title, Qt::ElideRight, inner.width() - 2 * captionPaddingX);
-        plateWidth = std::min(metrics.horizontalAdvance(text) + 2 * captionPaddingX, inner.width());
-        plateHeight = metrics.height() + 2 * captionPaddingY;
+    int sumA = 0, sumR = 0, sumG = 0, sumB = 0;
+    for (int i = -radius; i <= radius; ++i) {
+      const QRgb pixel = line[std::clamp(i, 0, inner - 1)];
+      sumA += qAlpha(pixel);
+      sumR += qRed(pixel);
+      sumG += qGreen(pixel);
+      sumB += qBlue(pixel);
     }
 
-    const qreal height = iconHeight + (hasIcon && plateHeight > 0 ? captionIconGap : 0.0) + plateHeight;
-    if (height <= 0 || height > inner.height() || (hasIcon && captionIconSize > inner.width())) {
-        return;
+    for (int i = 0; i < inner; ++i) {
+      const QRgb blurred =
+          qRgba(sumR / window, sumG / window, sumB / window, sumA / window);
+      if (horizontal) {
+        reinterpret_cast<QRgb *>(image.scanLine(o))[i] = blurred;
+      } else {
+        reinterpret_cast<QRgb *>(image.scanLine(i))[o] = blurred;
+      }
+
+      const QRgb leaving = line[std::clamp(i - radius, 0, inner - 1)];
+      const QRgb entering = line[std::clamp(i + radius + 1, 0, inner - 1)];
+      sumA += qAlpha(entering) - qAlpha(leaving);
+      sumR += qRed(entering) - qRed(leaving);
+      sumG += qGreen(entering) - qGreen(leaving);
+      sumB += qBlue(entering) - qBlue(leaving);
     }
+  }
+}
 
-    if (hasIcon) {
-        const QRectF iconRect(inner.center().x() - captionIconSize / 2,
-                              inner.bottom() - height,
-                              captionIconSize, captionIconSize);
-        icon.paint(&painter, iconRect.toRect());
-    }
+/*!
+ * Draws a blurred shadow of \a draw with \a painter, in \a color, under \a
+ * rect.
+ *
+ * \a draw paints the shape into a buffer of its own, with the origin at the top
+ * left of \a rect and at \a dpr device pixels per logical one; whatever it
+ * paints is taken for its alpha only. The buffer is padded by the reach of the
+ * kernel, blurred by three box passes (a Gaussian is not to be had from
+ * QPainter: its blur helpers are private and the widget effects are out of
+ * reach), then tinted and stamped a little below the shape.
+ */
+static void paintShadow(QPainter &painter, const QRectF &rect, qreal dpr,
+                        const QColor &color, qreal shadowRadius,
+                        const std::function<void(QPainter &)> &draw) {
+  if (rect.isEmpty()) {
+    return;
+  }
 
-    if (plateHeight > 0) {
-        const QColor textColor = captionTextColor();
-        // Rec. 709 luminance: a light text needs a dark plate and the other way round.
-        const qreal luminance = 0.2126 * textColor.redF() + 0.7152 * textColor.greenF() + 0.0722 * textColor.blueF();
-        QColor plateColor = luminance > 0.5 ? QColor(Qt::black) : QColor(Qt::white);
-        plateColor.setAlphaF(captionPlateAlpha);
+  const int box = boxRadius(shadowRadius * dpr);
+  const int pad = 3 * box;
+  const QSize size((rect.width() * dpr) + 2 * pad,
+                   (rect.height() * dpr) + 2 * pad);
 
-        const QRectF plate(inner.center().x() - plateWidth / 2, inner.bottom() - plateHeight, plateWidth, plateHeight);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(plateColor);
-        painter.drawRoundedRect(plate, captionRadius, captionRadius);
+  QImage buffer(size, QImage::Format_ARGB32_Premultiplied);
+  buffer.fill(Qt::transparent);
+  {
+    QPainter shapePainter(&buffer);
+    shapePainter.setRenderHints(QPainter::Antialiasing |
+                                QPainter::SmoothPixmapTransform |
+                                QPainter::TextAntialiasing);
+    shapePainter.translate(pad, pad);
+    shapePainter.scale(dpr, dpr);
+    draw(shapePainter);
+  }
 
-        painter.setPen(textColor);
-        painter.setFont(font);
-        painter.drawText(plate, Qt::AlignCenter, text);
-    }
+  for (int pass = 0; pass < 3; ++pass) {
+    boxBlurPass(buffer, box, true);
+    boxBlurPass(buffer, box, false);
+  }
+
+  // SourceIn keeps the blurred alpha and throws the colours away, which is what
+  // turns the shape into a shadow of one colour.
+  {
+    QPainter tintPainter(&buffer);
+    tintPainter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    tintPainter.fillRect(buffer.rect(), color);
+  }
+
+  const QRectF target(rect.left() - pad / dpr,
+                      rect.top() - pad / dpr + captionShadowDrop,
+                      size.width() / dpr, size.height() / dpr);
+  painter.drawImage(target, buffer);
+}
+
+/*!
+ * Draws \a icon and \a title with \a painter, along the bottom of \a area.
+ *
+ * The icon sits to the left of the title, and only the title gets a plate
+ * behind it, black or white depending on which one the text colour can be read
+ * against. Both carry a shadow: the title one in the colour of its own plate,
+ * the icon always a black one, since an icon brings its own colours and has to
+ * stay legible over a light background whatever the colour scheme is. Nothing
+ * is drawn at all when the area is too small to hold the result.
+ */
+static void paintCaption(QPainter &painter, const QRectF &area,
+                         const QIcon &icon, const QString &title, qreal dpr) {
+  const QRectF inner = area.adjusted(captionMargin, captionMargin,
+                                     -captionMargin, -captionMargin);
+  if (inner.isEmpty()) {
+    return;
+  }
+
+  const QFont font = QGuiApplication::font();
+  const QFontMetricsF metrics(font);
+  const QColor textColor = captionTextColor();
+  const QColor plateColor = captionPlateColor(textColor);
+
+  // Both parts are optional, and either one missing simply takes its band out.
+  const bool hasIcon = !icon.isNull() && captionIconSize <= inner.width();
+  const qreal iconBand = hasIcon ? captionIconSize + captionIconGap : 0.0;
+
+  QString text;
+  qreal plateWidth = 0.0;
+  qreal plateHeight = 0.0;
+  if (!title.isEmpty() && inner.width() - iconBand > 2 * captionPaddingX) {
+    const qreal textBudget = inner.width() - iconBand - 2 * captionPaddingX;
+    text = metrics.elidedText(title, Qt::ElideRight, textBudget);
+    plateWidth = std::min(metrics.horizontalAdvance(text) + 2 * captionPaddingX,
+                          textBudget + 2 * captionPaddingX);
+    plateHeight = metrics.height() + 2 * captionPaddingY;
+  }
+
+  // One row, centred on the area and sitting on its bottom edge.
+  const qreal width = (hasIcon ? captionIconSize : 0.0) +
+                      (hasIcon && plateWidth > 0 ? captionIconGap : 0.0) +
+                      plateWidth;
+  const qreal height = std::max(hasIcon ? captionIconSize : 0.0, plateHeight);
+  if (width <= 0 || height <= 0 || height > inner.height() ||
+      width > inner.width()) {
+    return;
+  }
+
+  const qreal left = inner.center().x() - width / 2;
+  const qreal middle = inner.bottom() - height / 2;
+
+  if (hasIcon) {
+    const QRectF iconRect(left, middle - captionIconSize / 2, captionIconSize,
+                          captionIconSize);
+
+    // An icon brings its own colours and has to stay legible over a light
+    // background whatever the colour scheme is, so its shadow is black.
+    QColor shadowColor(Qt::black);
+    shadowColor.setAlphaF(captionShadowAlpha);
+    paintShadow(painter, iconRect, dpr, shadowColor, iconShadowRadius,
+                [&icon](QPainter &shapePainter) {
+                  icon.paint(&shapePainter, QRect(0, 0, int(captionIconSize),
+                                                  int(captionIconSize)));
+                });
+
+    icon.paint(&painter, iconRect.toRect());
+  }
+
+  if (plateHeight > 0) {
+    const QRectF plate(left + (hasIcon ? iconBand : 0.0),
+                       middle - plateHeight / 2, plateWidth, plateHeight);
+
+    QColor filled = plateColor;
+    filled.setAlphaF(captionPlateAlpha);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(filled);
+    painter.drawRoundedRect(plate, captionRadius, captionRadius);
+
+    // The shadow of the text is the colour of its own plate, so it deepens
+    // the plate under the glyphs instead of colouring them.
+    QColor shadowColor = plateColor;
+    shadowColor.setAlphaF(captionShadowAlpha);
+    const QRectF local(0, 0, plate.width(), plate.height());
+    paintShadow(painter, plate, dpr, shadowColor, captionShadowRadius,
+                [&font, &text, local](QPainter &shapePainter) {
+                  shapePainter.setFont(font);
+                  shapePainter.drawText(local, Qt::AlignCenter, text);
+                });
+
+    painter.setPen(textColor);
+    painter.setFont(font);
+    painter.drawText(plate, Qt::AlignCenter, text);
+  }
 }
 
 OverlayWindow::OverlayWindow()
@@ -245,7 +414,8 @@ void ThumbnailOverlay::paintEvent(QPaintEvent *event)
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
     painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
     painter.setOpacity(std::min(m_captionOpacity, 1.0));
-    paintCaption(painter, QRectF(QPointF(0, 0), size()), m_icon, m_title);
+    paintCaption(painter, QRectF(QPointF(0, 0), size()), m_icon, m_title,
+                 devicePixelRatio());
 }
 
 bool ThumbnailOverlay::isDrag(const QPointF &origin, const QPointF &pos)
