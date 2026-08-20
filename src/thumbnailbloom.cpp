@@ -15,6 +15,10 @@
 #include <cursor.h>
 #include <effect/effecthandler.h>
 #include <input_event.h>
+#include <pointer_input.h>
+#include <touch_input.h>
+#include <window.h>
+#include <workspace.h>
 #include <effect/effectwindow.h>
 #include <opengl/glutils.h>
 
@@ -163,57 +167,94 @@ static bool sameRect(const QRectF &a, const QRectF &b)
 // ---------------------------------------------------------------------------
 
 ShieldFilter::ShieldFilter()
-    : InputEventFilter(InputFilterOrder::Decoration)
+    : InputEventFilter(InputFilterOrder::Popup)
 {
 }
 
-void ShieldFilter::setRegions(const QRegion &shields, const QRegion &thumbnails)
+void ShieldFilter::setState(const QRegion &shields, const QSet<Window *> &bloomed, const QRegion &thumbnails)
 {
     m_shields = shields;
+    m_bloomed = bloomed;
     m_thumbnails = thumbnails;
+}
+
+Window *ShieldFilter::windowBelow(const QPointF &pos) const
+{
+    // The same walk InputRedirection::findToplevel() does, minus what must not
+    // answer here: the bloomed windows, which are not painted where they are,
+    // and the internal windows, which are the effect's own shields and click
+    // targets. KWin's other internal surfaces are cut out of the shields long
+    // before this, so skipping all of them takes nothing away.
+    const QList<Window *> &stacking = workspace()->stackingOrder();
+    for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
+        Window *window = *it;
+        if (window->isDeleted() || window->isMinimized() || window->isHidden() || window->isHiddenByShowDesktop()) {
+            continue;
+        }
+        if (!window->isOnCurrentActivity() || !window->isOnCurrentDesktop() || !window->readyForPainting()) {
+            continue;
+        }
+        if (window->isInternal() || m_bloomed.contains(window)) {
+            continue;
+        }
+        if (window->hitTest(pos)) {
+            return window;
+        }
+    }
+
+    return nullptr;
+}
+
+void ShieldFilter::redirect(InputDeviceHandler *device, const QPointF &pos)
+{
+    // Only what a shield caught is moved on. Anything else, a thumbnail's click
+    // target included, is already focused where it belongs.
+    Window *focus = device->focus();
+    if (!focus || !focus->isInternal() || !m_shields.contains(pos.toPoint())) {
+        return;
+    }
+
+    // The split KWin makes in updateDecoration() and updateFocus(): outside the
+    // client area the decoration takes the event and the window itself is not
+    // focused at all, which is what makes the resize borders work.
+    Window *below = windowBelow(pos);
+    Decoration::DecoratedWindowImpl *decoration = nullptr;
+    if (below && below->decoratedWindow() && !below->clientGeometry().contains(pos)) {
+        decoration = below->decoratedWindow();
+    }
+
+    device->setDecoration(decoration);
+    device->setFocus(decoration ? nullptr : below);
+}
+
+bool ShieldFilter::pointerMotion(PointerMotionEvent *event)
+{
+    redirect(input()->pointer(), event->position);
+    return false;
 }
 
 bool ShieldFilter::pointerButton(PointerButtonEvent *event)
 {
-    const QPoint pos = event->position.toPoint();
-    if (m_shields.contains(pos)) {
-        return true;
-    }
+    redirect(input()->pointer(), event->position);
 
-    // A thumbnail belongs to its window, not to whatever it is painted over, so
-    // the buttons that do not activate it are dropped rather than handed to the
-    // window below. The left button is let through: the click target is an
-    // internal window and only gets the press if no earlier filter takes it.
-    return event->button != Qt::LeftButton && m_thumbnails.contains(pos);
+    // The left button has to reach the click target, an internal window that
+    // only gets the press if no earlier filter takes it.
+    return event->button != Qt::LeftButton && m_thumbnails.contains(event->position.toPoint());
 }
 
 bool ShieldFilter::pointerAxis(PointerAxisEvent *event)
 {
-    const QPoint pos = event->position.toPoint();
-    return m_shields.contains(pos) || m_thumbnails.contains(pos);
+    redirect(input()->pointer(), event->position);
+    return m_thumbnails.contains(event->position.toPoint());
 }
 
 bool ShieldFilter::touchDown(TouchDownEvent *event)
 {
-    if (!m_shields.contains(event->pos.toPoint())) {
-        return false;
-    }
-
-    // The rest of the sequence belongs to the swallowed press, wherever it
-    // travels: letting the motion or the release through would hand a half
-    // sequence to a window that never saw its beginning.
-    m_swallowedTouches.insert(event->id);
-    return true;
-}
-
-bool ShieldFilter::touchMotion(TouchMotionEvent *event)
-{
-    return m_swallowedTouches.contains(event->id);
-}
-
-bool ShieldFilter::touchUp(TouchUpEvent *event)
-{
-    return m_swallowedTouches.remove(event->id);
+    // Only the first point of a sequence can change the focus, the rest of it
+    // belongs to whoever got that one; KWin blocks the update itself, so
+    // redirecting on every point down is enough and never splits a sequence.
+    redirect(input()->touch(), event->pos);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -555,8 +596,10 @@ void ThumbnailBloomEffect::updateShields()
     // geometry, so hovering or clicking the area it vacated would still reach it.
     // A shield is an internal window put on that area: KWin hit tests internal
     // windows above the ordinary ones, so the pointer focus lands on the shield
-    // and the window below never sees an enter event either. Only clicks on the
-    // thumbnail activate a bloomed window.
+    // rather than on the window, which never sees an enter event at all. The
+    // shield does not answer the event itself, ShieldFilter hands it on to
+    // whatever is really below; only clicks on the thumbnail activate a bloomed
+    // window.
 
     // Whatever the thumbnails claim stays theirs; the shields are internal
     // windows too, and two of those on the same pixel have no defined order.
@@ -572,6 +615,7 @@ void ThumbnailBloomEffect::updateShields()
     QRegion covered = m_systemRegion;
     QRegion shieldRegion;
     QSet<EffectWindow *> shielded;
+    QSet<Window *> bloomedWindows;
     const QList<EffectWindow *> stack = effects->stackingOrder();
     for (auto it = stack.crbegin(); it != stack.crend(); ++it) {
         EffectWindow *w = *it;
@@ -586,6 +630,12 @@ void ThumbnailBloomEffect::updateShields()
         // set by updateOverlay() and cleared as soon as the window travels home.
         if (sit != m_states.end() && !sit->second.hitRegion.isEmpty()) {
             BloomState &state = sit->second;
+
+            // Every bloomed window has to be skipped when the input is handed
+            // on, shielded or not: one that is covered everywhere still has to
+            // stay out of the way under somebody else's shield.
+            bloomedWindows.insert(w->window());
+
             const QRegion exposed = QRegion(frame) - covered - thumbnails;
             if (!exposed.isEmpty()) {
                 if (!state.shield) {
@@ -614,7 +664,7 @@ void ThumbnailBloomEffect::updateShields()
         }
     }
 
-    m_shieldFilter.setRegions(shieldRegion, thumbnails);
+    m_shieldFilter.setState(shieldRegion, bloomedWindows, thumbnails);
 }
 
 // ---------------------------------------------------------------------------

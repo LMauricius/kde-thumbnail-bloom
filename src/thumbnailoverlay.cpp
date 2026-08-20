@@ -37,6 +37,23 @@ OverlayWindow::OverlayWindow()
 
 OverlayWindow::~OverlayWindow() = default;
 
+bool OverlayWindow::event(QEvent *event)
+{
+    // Touch has no per button handler to override, and an unhandled touch event
+    // is turned into a synthetic mouse event by Qt, which would then reach the
+    // window below. Accepting the whole sequence here stops both.
+    switch (event->type()) {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+    case QEvent::TouchEnd:
+    case QEvent::TouchCancel:
+        event->accept();
+        return true;
+    default:
+        return QRasterWindow::event(event);
+    }
+}
+
 void OverlayWindow::paintEvent(QPaintEvent *event)
 {
     // Source mode clears instead of blending, so what is below stays visible.
@@ -73,6 +90,20 @@ void OverlayWindow::wheelEvent(QWheelEvent *event)
 ThumbnailOverlay::ThumbnailOverlay() = default;
 
 ThumbnailOverlay::~ThumbnailOverlay() = default;
+
+bool ThumbnailOverlay::event(QEvent *event)
+{
+    // A tap does what a left click does. The rest of the sequence is swallowed
+    // by the base class, so a drag started on a thumbnail activates it once and
+    // then goes nowhere.
+    if (event->type() == QEvent::TouchBegin) {
+        event->accept();
+        Q_EMIT clicked();
+        return true;
+    }
+
+    return OverlayWindow::event(event);
+}
 
 void ThumbnailOverlay::mousePressEvent(QMouseEvent *event)
 {

@@ -26,18 +26,20 @@ class OverlayWindow;
 class ThumbnailOverlay;
 
 /*!
- * Swallows the pointer and touch input landing on the shields.
+ * Hands the input a shield captured over to the window really below it.
  *
- * A shield takes the pointer focus and the events KWin forwards to windows, but
- * not everything goes through the focus: the window action filter (raise,
- * activate, the mouse button commands) sits ahead of the internal windows in the
- * input chain and works straight off the position, which is why a press on a
- * shield can still act on the window underneath, differently per button. This
- * filter is installed ahead of that one and drops everything inside the shielded
- * region, so no button reaches a bloomed window where it is not painted.
+ * A shield only has to keep its bloomed window from being hovered and clicked;
+ * everything else in that area (the windows that became visible under it, the
+ * resize borders reaching over it) must keep working. Since the shield wins the
+ * hit test, KWin makes it the pointer focus and stops there, so this filter
+ * repeats KWin's own focus lookup on every event, skipping the shields and the
+ * bloomed windows, and points the focus at what it finds. From there on the
+ * event takes its ordinary path: the window below gets the hover, the click
+ * raises it, and its decoration gets the resize border.
  *
- * It is deliberately behind the popup and move/resize filters: a click on a
- * shield must still close an open menu and finish a running move.
+ * It is installed ahead of the decoration and window action filters, which is
+ * where the focus is consumed, but behind the popup and move/resize ones: a
+ * click on a shield must still close an open menu and finish a running move.
  */
 class ShieldFilter : public KWin::InputEventFilter
 {
@@ -45,25 +47,36 @@ public:
     ShieldFilter();
 
     /*!
-     * Sets the regions, in logical screen coordinates, that swallow input.
+     * Sets what the filter works on, all in logical screen coordinates.
      *
-     * \a shields drops everything; \a thumbnails drops everything but the left
-     * button, which has to reach the click target underneath it.
+     * \a shields is where the shields are, \a bloomed the windows they hide
+     * from the input, and \a thumbnails the click targets: a thumbnail belongs
+     * to its own window, so everything but the left button is dropped there
+     * rather than handed to whatever the thumbnail is painted over.
      */
-    void setRegions(const QRegion &shields, const QRegion &thumbnails);
+    void setState(const QRegion &shields, const QSet<KWin::Window *> &bloomed, const QRegion &thumbnails);
 
+    bool pointerMotion(KWin::PointerMotionEvent *event) override;
     bool pointerButton(KWin::PointerButtonEvent *event) override;
     bool pointerAxis(KWin::PointerAxisEvent *event) override;
     bool touchDown(KWin::TouchDownEvent *event) override;
-    bool touchMotion(KWin::TouchMotionEvent *event) override;
-    bool touchUp(KWin::TouchUpEvent *event) override;
 
 private:
+    /*!
+     * Moves the focus of \a device off the shield under \a pos, if that is
+     * where it is.
+     *
+     * The pointer and the touch screen keep a focus of their own, but both are
+     * InputDeviceHandlers and both are pointed at a shield the same way.
+     */
+    void redirect(KWin::InputDeviceHandler *device, const QPointF &pos);
+    /*! Returns the topmost window at \a pos that is neither bloomed nor one of ours. */
+    KWin::Window *windowBelow(const QPointF &pos) const;
+
     QRegion m_shields;
     QRegion m_thumbnails;
-    QSet<qint32> m_swallowedTouches; //!< touch points that went down on a shield
+    QSet<KWin::Window *> m_bloomed;
 };
-
 /*!
  * Shows covered inactive windows as thumbnails on the nearest free space.
  *
