@@ -21,6 +21,12 @@
             <label>Skip child windows</label>
             <default>false</default>
         </entry>
+        <entry name="MinimumOcclusion" type="Int">
+            <label>Occluded part of a window needed before it blooms, in percent of its area</label>
+            <default>8</default>
+            <min>1</min>
+            <max>100</max>
+        </entry>
         <entry name="InitialSize" type="Int">
             <label>Initial thumbnail size, in percent of the window size</label>
             <default>50</default>

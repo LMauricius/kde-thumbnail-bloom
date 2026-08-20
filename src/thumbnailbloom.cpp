@@ -423,6 +423,7 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
     m_layoutOptions.minScale = std::clamp(ThumbnailBloomConfig::minimumSize() / 100.0, 0.05, m_layoutOptions.initialScale);
     m_layoutOptions.scaleStep = 0.05;
     m_layoutOptions.margin = 8;
+    m_layoutOptions.minOccludedFraction = std::clamp(ThumbnailBloomConfig::minimumOcclusion() / 100.0, 0.01, 1.0);
 
     m_showIcons = ThumbnailBloomConfig::showIcons();
     m_showTitles = ThumbnailBloomConfig::showTitles();

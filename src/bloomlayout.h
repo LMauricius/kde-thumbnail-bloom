@@ -33,6 +33,7 @@ struct LayoutOptions
     qreal minScale = 0.15; //!< smallest size the search may fall back to
     qreal scaleStep = 0.05; //!< how much smaller each unsuccessful attempt gets
     int margin = 8; //!< gap kept between a thumbnail and its surroundings
+    qreal minOccludedFraction = 0.08; //!< how much of a window must be covered before it blooms
 };
 
 /*!
@@ -52,9 +53,9 @@ struct Placement
  *
  * Selection comes first, placement second, so that the set of thumbnails does
  * not depend on where the previous ones happened to land. A window is turned
- * into a thumbnail when it overlaps a LayoutWindow::reserved window (wherever
- * the two sit in the stack), or when a window above it that is staying put
- * covers a part of it. Windows that are themselves becoming thumbnails cover
+ * into a thumbnail when LayoutOptions::minOccludedFraction of its area lies
+ * over a LayoutWindow::reserved window (wherever the two sit in the stack), or
+ * is hidden by the windows above it that are staying put. Windows that are themselves becoming thumbnails cover
  * nothing, so one thumbnail does not pull the windows under it along.
  *
  * The thumbnail is then shrunk to LayoutOptions::initialScale and put in the

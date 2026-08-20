@@ -31,6 +31,19 @@ static bool fitsInside(const QRegion &region, const QRect &rect)
     return QRegion(rect).subtracted(region).isEmpty();
 }
 
+/*!
+ * Returns whether \a region covers at least \a fraction of \a rect. An empty
+ * rectangle is never covered enough, whatever the fraction.
+ */
+static bool coversEnough(const QRegion &region, const QRect &rect, qreal fraction)
+{
+    qreal covered = 0;
+    for (const QRect &part : region.intersected(rect)) {
+        covered += qreal(part.width()) * part.height();
+    }
+    return covered > 0 && covered >= qreal(rect.width()) * rect.height() * fraction;
+}
+
 /*! Squared distance between two points; good enough for comparing candidates. */
 static qreal distanceSquared(const QPointF &a, const QPointF &b)
 {
@@ -90,16 +103,18 @@ static std::optional<QRect> nearestFreeSlot(const QRegion &free, const QSize &si
 /*!
  * Picks the windows that get a thumbnail, as a flag per entry of \a stack.
  *
- * Two rules, in order: anything sharing space with a reserved window is in the
- * way of the window being worked in, and anything else is only worth moving
- * when a window that stays put hides a part of it.
+ * Two rules, in order: enough of the window lies over a reserved window, so
+ * that it is in the way of the window being worked in; or enough of it is
+ * hidden by the windows that stay put. Both measure the same
+ * LayoutOptions::minOccludedFraction of the window's own area, so a window
+ * merely grazing another is left alone either way.
  */
-static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack)
+static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const LayoutOptions &options)
 {
     std::vector<bool> bloomed(stack.size(), false);
 
-    // Rule one: overlapping a reserved window, whatever the stacking says. A
-    // window above the active one hides just as much of it as one below.
+    // Rule one: sharing space with a reserved window, whatever the stacking
+    // says. A window above the active one hides just as much of it as one below.
     QRegion reserved;
     for (const LayoutWindow &window : stack) {
         if (window.reserved) {
@@ -107,23 +122,25 @@ static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack)
         }
     }
     for (int i = 0; i < stack.size(); ++i) {
-        if (stack[i].eligible && !stack[i].reserved && reserved.intersects(stack[i].geometry.toAlignedRect())) {
+        if (stack[i].eligible && !stack[i].reserved
+            && coversEnough(reserved, stack[i].geometry.toAlignedRect(), options.minOccludedFraction)) {
             bloomed[i] = true;
         }
     }
 
     // Rule two: walk from the top down keeping the windows that stay where they
-    // are, and bloom whatever they hide a part of. Windows picked by rule one
+    // are, and bloom whatever they hide enough of. Windows picked by rule one
     // are leaving, so they hide nothing and are left out of the running region;
     // that is what stops one thumbnail from dragging the whole stack under it
-    // along with it.
+    // along with it. A window only a sliver of which is covered is still usable
+    // where it is, hence the threshold rather than a plain intersection test.
     QRegion cover;
     for (int i = stack.size() - 1; i >= 0; --i) {
         if (bloomed[i]) {
             continue;
         }
         const QRect geometry = stack[i].geometry.toAlignedRect();
-        if (stack[i].eligible && cover.intersects(geometry)) {
+        if (stack[i].eligible && coversEnough(cover, geometry, options.minOccludedFraction)) {
             bloomed[i] = true;
             continue;
         }
@@ -140,7 +157,7 @@ static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack)
 QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
 {
     const QRect area = workArea.toAlignedRect();
-    const std::vector<bool> bloomed = selectBloomed(stack);
+    const std::vector<bool> bloomed = selectBloomed(stack, options);
     QList<Placement> placements;
 
     // Everything a thumbnail may not be placed on: every window that stays put,
