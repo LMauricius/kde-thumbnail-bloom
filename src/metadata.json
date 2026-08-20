@@ -10,7 +10,7 @@
         "Description": "Shrinks inactive windows that are covered by others and moves them to the nearest free space",
         "EnabledByDefault": false,
         "Icon": "preferences-system-windows-effect-thumbnailbloom",
-        "License": "GPL",
+        "License": "GPL-2.0-or-later",
         "Name": "Thumbnail Bloom"
     },
     "X-KDE-ConfigModule": "kwin_thumbnailbloom_config"

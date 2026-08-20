@@ -196,7 +196,19 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
     reconfigure(ReconfigureAll);
 }
 
-ThumbnailBloomEffect::~ThumbnailBloomEffect() = default;
+ThumbnailBloomEffect::~ThumbnailBloomEffect()
+{
+    // Destroying an overlay makes KWin drop its internal window and emit
+    // windowClosed synchronously, and that handler walks m_states: every
+    // handler touching the map must be gone before the map is destructed, or
+    // forget() re-enters a container that is going away.
+    disconnect(effects, nullptr, this, nullptr);
+    disconnect(Cursors::self(), nullptr, this, nullptr);
+    for (auto &entry : m_states) {
+        disconnect(entry.first, nullptr, this, nullptr);
+    }
+    const auto states = std::move(m_states);
+}
 
 void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
 {
@@ -394,7 +406,20 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
     if (m_liftedWindow == w) {
         m_liftedWindow = nullptr;
     }
-    m_states.erase(w);
+
+    // Extracted rather than erased in place: destroying the overlay makes KWin
+    // emit windowClosed for its internal window synchronously, and that handler
+    // calls back into m_states, which has to be consistent by then. The overlay
+    // itself only dies on the next event loop pass, because this can run under
+    // input dispatch, where destroying an internal window is not survivable;
+    // its signals are cut right away so a click in the meantime cannot reach
+    // the window pointer that is about to go stale.
+    auto node = m_states.extract(w);
+    if (!node.empty() && node.mapped().overlay) {
+        ThumbnailOverlay *overlay = node.mapped().overlay.release();
+        overlay->disconnect();
+        overlay->deleteLater();
+    }
     effects->addRepaintFull();
 }
 
