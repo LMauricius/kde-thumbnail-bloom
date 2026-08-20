@@ -33,6 +33,14 @@
             <min>5</min>
             <max>100</max>
         </entry>
+        <entry name="ShowIcons" type="Bool">
+            <label>Show the window icon on each thumbnail</label>
+            <default>true</default>
+        </entry>
+        <entry name="ShowTitles" type="Bool">
+            <label>Show the window title on each thumbnail</label>
+            <default>true</default>
+        </entry>
         <entry name="Opacity" type="Int">
             <label>Thumbnail opacity, in percent</label>
             <default>90</default>

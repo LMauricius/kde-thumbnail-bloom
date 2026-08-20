@@ -6,6 +6,9 @@
 
 #include "thumbnailoverlay.h"
 
+#include <KColorScheme>
+
+#include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPainter>
@@ -15,6 +18,87 @@
 
 namespace ThumbnailBloom
 {
+
+// ---------------------------------------------------------------------------
+// Caption
+// ---------------------------------------------------------------------------
+
+//! Fixed metrics of the caption, in logical pixels.
+constexpr qreal captionIconSize = 32.0;
+constexpr qreal captionIconGap = 4.0;
+constexpr qreal captionPaddingX = 8.0;
+constexpr qreal captionPaddingY = 3.0;
+constexpr qreal captionRadius = 6.0;
+constexpr qreal captionMargin = 6.0;
+//! How opaque the plate behind the title is.
+constexpr qreal captionPlateAlpha = 0.55;
+
+/*! Returns the colour the caption text is written in. */
+static QColor captionTextColor()
+{
+    // Read on every use: the colour scheme can change while the effect runs.
+    return KColorScheme(QPalette::Active, KColorScheme::Window).foreground().color();
+}
+
+/*!
+ * Draws \a icon above \a title with \a painter, at the bottom of \a area.
+ *
+ * The icon sits free, and only the title gets a plate behind it, black or white
+ * depending on which one the text colour can be read against. Nothing is drawn
+ * at all when the area is too small to hold the result.
+ */
+static void paintCaption(QPainter &painter, const QRectF &area, const QIcon &icon, const QString &title)
+{
+    const QRectF inner = area.adjusted(captionMargin, captionMargin, -captionMargin, -captionMargin);
+    if (inner.isEmpty()) {
+        return;
+    }
+
+    const QFont font = QGuiApplication::font();
+    const QFontMetricsF metrics(font);
+
+    // Both parts are optional, and either one missing simply takes its band out.
+    const bool hasIcon = !icon.isNull();
+    const qreal iconHeight = hasIcon ? captionIconSize : 0.0;
+
+    QString text;
+    qreal plateWidth = 0.0;
+    qreal plateHeight = 0.0;
+    if (!title.isEmpty() && inner.width() > 2 * captionPaddingX) {
+        text = metrics.elidedText(title, Qt::ElideRight, inner.width() - 2 * captionPaddingX);
+        plateWidth = std::min(metrics.horizontalAdvance(text) + 2 * captionPaddingX, inner.width());
+        plateHeight = metrics.height() + 2 * captionPaddingY;
+    }
+
+    const qreal height = iconHeight + (hasIcon && plateHeight > 0 ? captionIconGap : 0.0) + plateHeight;
+    if (height <= 0 || height > inner.height() || (hasIcon && captionIconSize > inner.width())) {
+        return;
+    }
+
+    if (hasIcon) {
+        const QRectF iconRect(inner.center().x() - captionIconSize / 2,
+                              inner.bottom() - height,
+                              captionIconSize, captionIconSize);
+        icon.paint(&painter, iconRect.toRect());
+    }
+
+    if (plateHeight > 0) {
+        const QColor textColor = captionTextColor();
+        // Rec. 709 luminance: a light text needs a dark plate and the other way round.
+        const qreal luminance = 0.2126 * textColor.redF() + 0.7152 * textColor.greenF() + 0.0722 * textColor.blueF();
+        QColor plateColor = luminance > 0.5 ? QColor(Qt::black) : QColor(Qt::white);
+        plateColor.setAlphaF(captionPlateAlpha);
+
+        const QRectF plate(inner.center().x() - plateWidth / 2, inner.bottom() - plateHeight, plateWidth, plateHeight);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(plateColor);
+        painter.drawRoundedRect(plate, captionRadius, captionRadius);
+
+        painter.setPen(textColor);
+        painter.setFont(font);
+        painter.drawText(plate, Qt::AlignCenter, text);
+    }
+}
 
 OverlayWindow::OverlayWindow()
 {
@@ -39,6 +123,16 @@ OverlayWindow::OverlayWindow()
 }
 
 OverlayWindow::~OverlayWindow() = default;
+
+void OverlayWindow::setOutputOnly(bool outputOnly)
+{
+    setProperty("outputOnly", outputOnly);
+}
+
+bool OverlayWindow::isOutputOnly() const
+{
+    return property("outputOnly").toBool();
+}
 
 bool OverlayWindow::event(QEvent *event)
 {
@@ -98,7 +192,7 @@ ThumbnailOverlay::ThumbnailOverlay()
     m_longPressTimer.setSingleShot(true);
     m_longPressTimer.setInterval(QGuiApplication::styleHints()->mousePressAndHoldInterval());
     connect(&m_longPressTimer, &QTimer::timeout, this, [this]() {
-        if (m_touchArmed) {
+        if (m_touchArmed && !isOutputOnly()) {
             m_touchArmed = false;
             Q_EMIT menuRequested(m_touchOrigin);
         }
@@ -106,6 +200,53 @@ ThumbnailOverlay::ThumbnailOverlay()
 }
 
 ThumbnailOverlay::~ThumbnailOverlay() = default;
+
+void ThumbnailOverlay::setCaption(const QIcon &icon, const QString &title)
+{
+    if (m_title == title && m_icon.cacheKey() == icon.cacheKey()) {
+        return;
+    }
+
+    m_icon = icon;
+    m_title = title;
+    if (m_captionOpacity > 0) {
+        update();
+    }
+}
+
+void ThumbnailOverlay::setCaptionOpacity(qreal opacity)
+{
+    // Repainted only when the change can be seen: the fade runs on the
+    // compositor's clock and would otherwise queue a repaint every frame for
+    // steps far below one step of alpha.
+    if (std::abs(opacity - m_captionOpacity) < 1.0 / 255.0) {
+        return;
+    }
+
+    m_captionOpacity = opacity;
+    update();
+}
+
+void ThumbnailOverlay::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event)
+
+    // The whole window is cleared, not just the exposed part: the backing store
+    // keeps what was drawn last time, so clearing less would leave the previous
+    // caption underneath the new one and blend the two together.
+    QPainter painter(this);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.fillRect(QRect(QPoint(0, 0), size()), Qt::transparent);
+
+    if (m_captionOpacity <= 0 || (m_icon.isNull() && m_title.isEmpty())) {
+        return;
+    }
+
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
+    painter.setOpacity(std::min(m_captionOpacity, 1.0));
+    paintCaption(painter, QRectF(QPointF(0, 0), size()), m_icon, m_title);
+}
 
 bool ThumbnailOverlay::isDrag(const QPointF &origin, const QPointF &pos)
 {
@@ -119,7 +260,7 @@ bool ThumbnailOverlay::event(QEvent *event)
     switch (event->type()) {
     case QEvent::TouchBegin: {
         const QList<QEventPoint> &points = static_cast<QTouchEvent *>(event)->points();
-        if (!m_touchArmed && !points.isEmpty()) {
+        if (!m_touchArmed && !points.isEmpty() && !isOutputOnly()) {
             m_touchId = points.first().id();
             m_touchOrigin = points.first().globalPosition();
             m_touchArmed = true;
@@ -171,6 +312,10 @@ bool ThumbnailOverlay::event(QEvent *event)
 void ThumbnailOverlay::mousePressEvent(QMouseEvent *event)
 {
     event->accept();
+
+    if (isOutputOnly()) {
+        return;
+    }
 
     // The left button decides nothing yet: what happens next (a release or a
     // move) is what tells an activation from a drag apart.

@@ -59,7 +59,12 @@ Found under System Settings, Desktop Effects, next to the effect's entry.
 | Child windows             | not skipped | Dialogs and other transient windows may become thumbnails. |
 | Initial thumbnail size    | 50%         | Size a thumbnail is tried at first.                        |
 | Minimum thumbnail size    | 15%         | Smallest size the search may fall back to.                 |
+| Window icons              | shown       | Icon drawn above the title of each thumbnail.              |
+| Window titles             | shown       | Title drawn on a plate at the bottom of each thumbnail.    |
 | Thumbnail opacity         | 70%         | Opacity of a thumbnail; a hovered one fades to opaque.     |
+
+The icon and the title fade out while a thumbnail is hovered, and a thumbnail too small to hold them
+goes without.
 
 The active window never becomes a thumbnail, and neither do panels, docks, menus or windows being
 moved or resized.

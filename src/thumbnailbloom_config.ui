@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>420</width>
-    <height>240</height>
+    <height>300</height>
    </rect>
   </property>
   <layout class="QFormLayout" name="formLayout">
@@ -87,13 +87,34 @@
     </widget>
    </item>
    <item row="6" column="0">
+    <widget class="QLabel" name="showLabel">
+     <property name="text">
+      <string>Show on thumbnails:</string>
+     </property>
+    </widget>
+   </item>
+   <item row="6" column="1">
+    <widget class="QCheckBox" name="kcfg_ShowIcons">
+     <property name="text">
+      <string>Window icons</string>
+     </property>
+    </widget>
+   </item>
+   <item row="7" column="1">
+    <widget class="QCheckBox" name="kcfg_ShowTitles">
+     <property name="text">
+      <string>Window titles</string>
+     </property>
+    </widget>
+   </item>
+   <item row="8" column="0">
     <widget class="QLabel" name="opacityLabel">
      <property name="text">
       <string>Thumbnail opacity:</string>
      </property>
     </widget>
    </item>
-   <item row="6" column="1">
+   <item row="8" column="1">
     <widget class="QSpinBox" name="kcfg_Opacity">
      <property name="suffix">
       <string> %</string>

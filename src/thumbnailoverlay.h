@@ -6,8 +6,10 @@
 
 #pragma once
 
+#include <QIcon>
 #include <QPointF>
 #include <QRasterWindow>
+#include <QString>
 #include <QTimer>
 
 namespace ThumbnailBloom
@@ -34,6 +36,21 @@ public:
     OverlayWindow();
     ~OverlayWindow() override;
 
+    /*!
+     * Makes the window paint without taking any input, or stop doing so.
+     *
+     * KWin reads the "outputOnly" property of the QWindow in
+     * InternalWindow::hitTest(), which is the only way an internal window can
+     * stay on screen and yet be missed by the hit test; hiding it would take
+     * the painting with it. Subclasses also stop reporting gestures, so an
+     * event that reaches one anyway still means nothing.
+     */
+    void setOutputOnly(bool outputOnly);
+
+protected:
+    /*! Whether the window is painting only and must report no gesture. */
+    bool isOutputOnly() const;
+
 protected:
     bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
@@ -46,10 +63,16 @@ protected:
 /*!
  * The click target placed exactly on top of a thumbnail.
  *
- * It covers the thumbnail's rectangle, paints nothing and turns the gestures it
- * swallows into the three things a thumbnail can do: activate its window, drag
- * it out of the thumbnail, or open its window menu. The hover outline is drawn
- * by the effect instead, so that it stays in step with the animation.
+ * It covers the thumbnail's rectangle and turns the gestures it swallows into
+ * the three things a thumbnail can do: activate its window, drag it out of the
+ * thumbnail, or open its window menu. The hover outline is drawn by the effect
+ * instead, so that it stays in step with the animation.
+ *
+ * It is also what carries the icon and the title of the window. Painting those
+ * here rather than from the effect is what keeps them stable: the compositor
+ * draws this window once per frame like any other, so the caption can neither
+ * be missed by a partial repaint nor blended over itself when the thumbnail is
+ * painted twice (which is what a lifted thumbnail is).
  *
  * A press never decides anything on its own; only what follows it does. The
  * pointer keeps its focus on this window for as long as a button is down
@@ -63,6 +86,14 @@ class ThumbnailOverlay : public OverlayWindow
 public:
     ThumbnailOverlay();
     ~ThumbnailOverlay() override;
+
+    /*!
+     * Sets what the caption shows: \a icon above \a title, either of which may
+     * be empty to leave that part out.
+     */
+    void setCaption(const QIcon &icon, const QString &title);
+    /*! Sets how opaque the caption is painted, from 0 (gone) to 1. */
+    void setCaptionOpacity(qreal opacity);
 
 Q_SIGNALS:
     /*! A click or a tap finished on the thumbnail without turning into a drag. */
@@ -79,6 +110,7 @@ Q_SIGNALS:
 
 protected:
     bool event(QEvent *event) override;
+    void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -86,6 +118,10 @@ protected:
 private:
     /*! Whether \a pos is far enough from \a origin to count as a drag. */
     static bool isDrag(const QPointF &origin, const QPointF &pos);
+
+    QIcon m_icon;
+    QString m_title;
+    qreal m_captionOpacity = 0.0;
 
     QPointF m_pressOrigin; //!< where the left button went down
     bool m_pressed = false; //!< whether a left press is still undecided

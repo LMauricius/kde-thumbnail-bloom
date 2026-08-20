@@ -147,6 +147,9 @@ private:
         qreal fromOpacity = 1.0; //!< opacity the running animation started at
         qreal toOpacity = 1.0; //!< opacity the animation ends at
         qreal currentOpacity = 1.0; //!< opacity used by the current frame
+        qreal fromCaption = 0.0; //!< caption opacity the running animation started at
+        qreal toCaption = 0.0; //!< caption opacity the animation ends at
+        qreal currentCaption = 0.0; //!< caption opacity the click target paints with
         bool hovered = false; //!< whether the pointer is on the thumbnail
         QRegion hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
@@ -213,6 +216,8 @@ private:
     std::unordered_map<KWin::EffectWindow *, BloomState> m_states;
     QTimer m_relayoutTimer;
     std::chrono::milliseconds m_animationDuration;
+    bool m_showIcons = true;
+    bool m_showTitles = true;
     qreal m_thumbnailOpacity = 0.7; //!< opacity of a thumbnail that is not hovered
     LayoutOptions m_layoutOptions;
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements

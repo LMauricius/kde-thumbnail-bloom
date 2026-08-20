@@ -424,6 +424,9 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
     m_layoutOptions.scaleStep = 0.05;
     m_layoutOptions.margin = 8;
 
+    m_showIcons = ThumbnailBloomConfig::showIcons();
+    m_showTitles = ThumbnailBloomConfig::showTitles();
+
     m_thumbnailOpacity = std::clamp(ThumbnailBloomConfig::opacity() / 100.0, 0.1, 1.0);
 
     // The system's animation speed is already folded into animationTime().
@@ -535,6 +538,10 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
         ? grownRect(base, QRectF(w->frameGeometry()), QRectF(effects->clientArea(MaximizeArea, w)))
         : base;
     const qreal targetOpacity = (thumbnail && !state.hovered) ? m_thumbnailOpacity : 1.0;
+    // The caption belongs to the resting thumbnail only: it fades out under the
+    // pointer, and on the way back to the real window it is gone before the
+    // window is itself again.
+    const qreal targetCaption = (thumbnail && !state.hovered) ? 1.0 : 0.0;
 
     // The click target follows the resting rectangle, not the animation: a
     // thumbnail can be hovered and clicked from the moment it sets off, but only
@@ -544,8 +551,10 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     if (inserted) {
         state.from = state.current = state.to = QRectF(w->frameGeometry());
         state.fromOpacity = state.currentOpacity = state.toOpacity = 1.0;
+        state.fromCaption = state.currentCaption = state.toCaption = 0.0;
         state.timeline.setEasingCurve(QEasingCurve::InOutCubic);
-    } else if (sameRect(state.to, target) && qFuzzyCompare(state.toOpacity, targetOpacity)) {
+    } else if (sameRect(state.to, target) && qFuzzyCompare(state.toOpacity, targetOpacity)
+               && qFuzzyCompare(state.toCaption, targetCaption)) {
         return;
     }
 
@@ -557,6 +566,7 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // already spent, and still arrives one animation duration after it left.
     state.to = target;
     state.toOpacity = targetOpacity;
+    state.toCaption = targetCaption;
     if (!inserted && !state.timeline.done()) {
         m_animating = true;
         effects->addRepaintFull();
@@ -565,6 +575,7 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
 
     state.from = state.current;
     state.fromOpacity = state.currentOpacity;
+    state.fromCaption = state.currentCaption;
     state.timeline.setDuration(m_animationDuration);
     state.timeline.reset();
 
@@ -748,10 +759,20 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     const QRect rect = state.base.toAlignedRect();
     state.hitRegion = QRegion(rect) - m_systemRegion;
 
-    if (sameRect(state.base, QRectF(w->frameGeometry())) || state.hitRegion.isEmpty()) {
+    const bool goingHome = sameRect(state.base, QRectF(w->frameGeometry()));
+    if (goingHome || state.hitRegion.isEmpty()) {
         state.hitRegion = QRegion();
         if (state.overlay) {
-            state.overlay->hide();
+            // A thumbnail on its way back to its window keeps its click target
+            // up, where it is, for as long as the caption is still fading out on
+            // it. It must not act as a thumbnail any more though, so it is made
+            // output only; the state (and with it the window) is dropped once
+            // the trip ends.
+            if (goingHome && state.currentCaption > 0) {
+                state.overlay->setOutputOnly(true);
+            } else {
+                state.overlay->hide();
+            }
         }
         return;
     }
@@ -770,6 +791,13 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
             openWindowMenu(w, pos);
         });
     }
+
+    state.overlay->setOutputOnly(false);
+
+    // The caption is drawn by the click target, which is the one surface of a
+    // thumbnail the compositor paints exactly once per frame.
+    state.overlay->setCaption(m_showIcons ? w->icon() : QIcon(), m_showTitles ? w->caption() : QString());
+    state.overlay->setCaptionOpacity(state.currentCaption);
 
     // The resting rectangle, never the current one: the click target must not
     // travel with the animation, and never grows with the hover either.
@@ -968,6 +996,10 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         const qreal progress = state.timeline.value();
         state.current = interpolateRect(state.from, state.to, progress);
         state.currentOpacity = state.fromOpacity * (1.0 - progress) + state.toOpacity * progress;
+        state.currentCaption = state.fromCaption * (1.0 - progress) + state.toCaption * progress;
+        if (state.overlay) {
+            state.overlay->setCaptionOpacity(state.currentCaption);
+        }
 
         if (!state.timeline.done()) {
             m_animating = true;
@@ -1014,11 +1046,12 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     }
     m_liftPending = m_liftAnchor != nullptr;
 
+    // forget(), not erase(): the click target may still be up, painting the last
+    // of the caption, and an internal window may not be destroyed from inside the
+    // effect chain. forget() cuts its signals now and lets it die on the next
+    // event loop pass.
     for (EffectWindow *w : settledBack) {
-        if (m_liftedWindow == w) {
-            m_liftedWindow = nullptr;
-        }
-        m_states.erase(w);
+        forget(w);
     }
 
     Effect::prePaintScreen(data);
