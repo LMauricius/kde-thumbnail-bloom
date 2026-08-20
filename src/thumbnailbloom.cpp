@@ -269,6 +269,10 @@ void ThumbnailBloomEffect::relayout()
             retarget(w, QRectF(w->frameGeometry()));
         }
     }
+
+    // The click targets have just been placed and moved, so the pointer can end
+    // up on another thumbnail without having moved at all.
+    updateHover(effects->cursorPos());
 }
 
 void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
@@ -280,6 +284,11 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     const QRectF target = state.hovered
         ? grownRect(base, QRectF(w->frameGeometry()), QRectF(effects->clientArea(MaximizeArea, w)))
         : base;
+
+    // The click target follows the resting rectangle, not the animation: a
+    // thumbnail can be hovered and clicked from the moment it sets off, but only
+    // where it is going to end up.
+    updateOverlay(w, state);
 
     if (inserted) {
         state.from = state.current = state.to = QRectF(w->frameGeometry());
@@ -293,22 +302,17 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     state.timeline.setDuration(m_animationDuration);
     state.timeline.reset();
 
-    // The click target only makes sense once the thumbnail has come to rest.
-    if (state.overlay) {
-        state.overlay->hide();
-    }
-
     m_animating = true;
     effects->addRepaintFull();
 }
 
 void ThumbnailBloomEffect::updateHover(const QPointF &pos)
 {
-    // While a thumbnail animates it moves under a standing pointer and its click
-    // target is hidden, so only resting thumbnails take part; the hover is
-    // evaluated again as soon as one comes to rest.
-    const auto settled = [](const BloomState &state) {
-        return state.timeline.done() && state.overlay && state.overlay->isVisible();
+    // Everything with a placed click target takes part, animating or not: the
+    // click target sits on the destination of the thumbnail, so the hit test
+    // never follows it along its path.
+    const auto targetable = [](const BloomState &state) {
+        return state.overlay && state.overlay->isVisible();
     };
 
     // The hit test is against the resting rectangle, never the grown one: the
@@ -320,13 +324,13 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // the pointer stays on it.
     EffectWindow *hovered = nullptr;
     for (const auto &[w, state] : m_states) {
-        if (settled(state) && state.base.contains(pos) && (!hovered || state.hovered)) {
+        if (targetable(state) && state.base.contains(pos) && (!hovered || state.hovered)) {
             hovered = w;
         }
     }
 
     for (const auto &[w, state] : m_states) {
-        if (settled(state)) {
+        if (targetable(state)) {
             setHovered(w, w == hovered);
         }
     }
@@ -366,6 +370,19 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
 
 void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
 {
+    // Only ever reached from the relayout pass: hiding an internal window makes
+    // KWin destroy it synchronously, which must not happen under pointer
+    // dispatch or under the effect chain.
+    //
+    // A window travelling back to its own geometry stops being a thumbnail, so
+    // it loses its click target right away rather than at the end of the trip.
+    if (sameRect(state.base, QRectF(w->frameGeometry()))) {
+        if (state.overlay) {
+            state.overlay->hide();
+        }
+        return;
+    }
+
     if (!state.overlay) {
         state.overlay = std::make_unique<ThumbnailOverlay>();
         connect(state.overlay.get(), &ThumbnailOverlay::clicked, this, [w]() {
@@ -373,16 +390,10 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
         });
     }
 
-    const bool wasVisible = state.overlay->isVisible();
-    const QRect geometry = state.current.toAlignedRect();
-    state.overlay->setGeometry(geometry);
+    // The resting rectangle, never the current one: the click target must not
+    // travel with the animation, and never grows with the hover either.
+    state.overlay->setGeometry(state.base.toAlignedRect());
     state.overlay->show();
-
-    // The cursor does not have to move for a thumbnail to come to rest under it,
-    // so the hover is evaluated once more whenever a click target reappears.
-    if (!wasVisible) {
-        updateHover(effects->cursorPos());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,11 +483,9 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         }
 
         // A thumbnail that has arrived back at its window is not a thumbnail
-        // any more; everything else gets its click target placed.
+        // any more. Click targets are placed by the relayout, not from here.
         if (sameRect(state.to, QRectF(w->frameGeometry()))) {
             settledBack.push_back(w);
-        } else {
-            updateOverlay(w, state);
         }
     }
 

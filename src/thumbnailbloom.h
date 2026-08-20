@@ -72,7 +72,7 @@ private:
     void scheduleRelayout();
     /*! Starts or retargets the animation of \a w towards \a base, grown if hovered. */
     void retarget(KWin::EffectWindow *w, const QRectF &base);
-    /*! Marks the topmost settled thumbnail under \a pos as hovered, and the rest as not. */
+    /*! Marks the topmost thumbnail whose resting rectangle holds \a pos as hovered, and the rest as not. */
     void updateHover(const QPointF &pos);
     /*! Marks the thumbnail of \a w as hovered or not and animates it accordingly. */
     void setHovered(KWin::EffectWindow *w, bool hovered);
@@ -84,7 +84,7 @@ private:
     void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport);
     /*! Draws the hover outline just inside \a rect, in logical screen coordinates. */
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, const QRectF &rect) const;
-    /*! Keeps the click target of \a w in sync with its thumbnail. */
+    /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
 
     // --- window classification ---
