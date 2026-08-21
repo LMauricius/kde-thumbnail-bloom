@@ -199,7 +199,7 @@ ShieldFilter::ShieldFilter()
 {
 }
 
-void ShieldFilter::setState(const QRegion &shields, const QSet<Window *> &bloomed, const QRegion &thumbnails)
+void ShieldFilter::setState(const QRegion &shields, const QSet<Window *> &bloomed, const QList<Thumbnail> &thumbnails)
 {
     m_shields = shields;
     m_bloomed = bloomed;
@@ -233,12 +233,70 @@ Window *ShieldFilter::windowBelow(const QPointF &pos) const
     return nullptr;
 }
 
+bool ShieldFilter::isCovered(Window *window, const QPointF &pos) const
+{
+    // The same walk as windowBelow(), stopped at the bloomed window itself:
+    // whatever answers the hit test before it is reached is stacked above it,
+    // and so is painted over its thumbnail. Everything that is not a window of
+    // its own (the effect's click targets and shields, KWin's own surfaces) is
+    // skipped, and so are the other bloomed windows, which are not painted where
+    // they are either.
+    if (!window) {
+        return false;
+    }
+
+    const QList<Window *> &stacking = workspace()->stackingOrder();
+    for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
+        Window *candidate = *it;
+        if (candidate == window) {
+            return false;
+        }
+        if (candidate->isDeleted() || candidate->isMinimized() || candidate->isHidden() || candidate->isHiddenByShowDesktop()) {
+            continue;
+        }
+        if (!candidate->isOnCurrentActivity() || !candidate->isOnCurrentDesktop() || !candidate->readyForPainting()) {
+            continue;
+        }
+        if (candidate->isInternal() || m_bloomed.contains(candidate)) {
+            continue;
+        }
+        if (candidate->hitTest(pos)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+const ShieldFilter::Thumbnail *ShieldFilter::thumbnailAt(const QPointF &pos) const
+{
+    // The click targets never overlap, so the first hit is the only one.
+    const auto it = std::find_if(m_thumbnails.cbegin(), m_thumbnails.cend(), [&pos](const Thumbnail &thumbnail) {
+        return thumbnail.region.contains(pos.toPoint());
+    });
+    return it != m_thumbnails.cend() ? &(*it) : nullptr;
+}
+
+bool ShieldFilter::isThumbnailUsable(const QPointF &pos) const
+{
+    // The pixels a window is painted over belong to that window, so a thumbnail
+    // does nothing there, however much of its click target reaches over it.
+    const Thumbnail *thumbnail = thumbnailAt(pos);
+    return thumbnail && !isCovered(thumbnail->window, pos);
+}
+
 void ShieldFilter::redirect(InputDeviceHandler *device, const QPointF &pos)
 {
-    // Only what a shield caught is moved on. Anything else, a thumbnail's click
-    // target included, is already focused where it belongs.
+    // Only what one of ours caught is moved on: a shield, or a click target on a
+    // part of its thumbnail that a window is painted over. Anything else is
+    // already focused where it belongs.
     Window *focus = device->focus();
-    if (!focus || !focus->isInternal() || !m_shields.contains(pos.toPoint())) {
+    if (!focus || !focus->isInternal()) {
+        return;
+    }
+    const Thumbnail *thumbnail = thumbnailAt(pos);
+    const bool covered = thumbnail && isCovered(thumbnail->window, pos);
+    if (!m_shields.contains(pos.toPoint()) && !covered) {
         return;
     }
 
@@ -271,13 +329,13 @@ bool ShieldFilter::pointerButton(PointerButtonEvent *event)
     if (event->button == Qt::LeftButton || event->button == Qt::RightButton) {
         return false;
     }
-    return m_thumbnails.contains(event->position.toPoint());
+    return isThumbnailUsable(event->position);
 }
 
 bool ShieldFilter::pointerAxis(PointerAxisEvent *event)
 {
     redirect(input()->pointer(), event->position);
-    return m_thumbnails.contains(event->position.toPoint());
+    return isThumbnailUsable(event->position);
 }
 
 bool ShieldFilter::touchDown(TouchDownEvent *event)
@@ -705,9 +763,12 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // cut out of the region and hovering there does nothing.
     // At most one thumbnail is hovered, and the hovered one keeps it as long as
     // the pointer stays on it.
+    // A window painted over the thumbnail takes that part of it away, the hover
+    // included: the pointer is on the window, not on a thumbnail it cannot see.
     EffectWindow *hovered = nullptr;
     for (const auto &[w, state] : m_states) {
-        if (targetable(state) && state.hitRegion.contains(pos.toPoint()) && (!hovered || state.hovered)) {
+        if (targetable(state) && state.hitRegion.contains(pos.toPoint())
+            && !m_shieldFilter.isCovered(w->window(), pos) && (!hovered || state.hovered)) {
             hovered = w;
         }
     }
@@ -887,9 +948,16 @@ void ThumbnailBloomEffect::updateShields()
 
     // Whatever the thumbnails claim stays theirs; the shields are internal
     // windows too, and two of those on the same pixel have no defined order.
+    // The filter is told which window each one belongs to as well, so that it
+    // can ask whether the thumbnail is visible at all where an event lands.
     QRegion thumbnails;
+    QList<ShieldFilter::Thumbnail> thumbnailAreas;
     for (const auto &[w, state] : m_states) {
+        if (state.hitRegion.isEmpty()) {
+            continue;
+        }
         thumbnails += state.hitRegion;
+        thumbnailAreas.append(ShieldFilter::Thumbnail{w->window(), state.hitRegion});
     }
 
     // Walking the stack top down keeps a shield inside the area where its window
@@ -948,7 +1016,7 @@ void ThumbnailBloomEffect::updateShields()
         }
     }
 
-    m_shieldFilter.setState(shieldRegion, bloomedWindows, thumbnails);
+    m_shieldFilter.setState(shieldRegion, bloomedWindows, thumbnailAreas);
 }
 
 // ---------------------------------------------------------------------------

@@ -47,6 +47,13 @@ class ShieldFilter : public KWin::InputEventFilter
 public:
     ShieldFilter();
 
+    /*! Where one click target is, and whose window it shows. */
+    struct Thumbnail
+    {
+        KWin::Window *window;
+        QRegion region;
+    };
+
     /*!
      * Sets what the filter works on, all in logical screen coordinates.
      *
@@ -55,7 +62,19 @@ public:
      * to its own window, so every button that means nothing on a thumbnail is
      * dropped there rather than handed to whatever it is painted over.
      */
-    void setState(const QRegion &shields, const QSet<KWin::Window *> &bloomed, const QRegion &thumbnails);
+    void setState(const QRegion &shields, const QSet<KWin::Window *> &bloomed, const QList<Thumbnail> &thumbnails);
+
+    /*!
+     * Whether \a window is hidden at \a pos by a window painted over it.
+     *
+     * A thumbnail is painted at the stacking position of the window it belongs
+     * to, so anything above that window covers it. Which window is at \a pos is
+     * left to KWin's own hit test, so input shapes and decorations are honoured
+     * exactly; only the walk stops early, at the bloomed window itself. Used to
+     * keep a thumbnail from acting where it cannot be seen: the input goes to
+     * the window covering it, as it does over a shield.
+     */
+    bool isCovered(KWin::Window *window, const QPointF &pos) const;
 
     bool pointerMotion(KWin::PointerMotionEvent *event) override;
     bool pointerButton(KWin::PointerButtonEvent *event) override;
@@ -73,9 +92,13 @@ private:
     void redirect(KWin::InputDeviceHandler *device, const QPointF &pos);
     /*! Returns the topmost window at \a pos that is neither bloomed nor one of ours. */
     KWin::Window *windowBelow(const QPointF &pos) const;
+    /*! Returns the thumbnail whose click target holds \a pos, if there is one. */
+    const Thumbnail *thumbnailAt(const QPointF &pos) const;
+    /*! Whether a thumbnail holds \a pos and is visible there, so that it can act. */
+    bool isThumbnailUsable(const QPointF &pos) const;
 
     QRegion m_shields;
-    QRegion m_thumbnails;
+    QList<Thumbnail> m_thumbnails;
     QSet<KWin::Window *> m_bloomed;
 };
 /*!
