@@ -125,6 +125,18 @@ static QColor outlineColor()
 }
 
 /*!
+ * Returns whether \a w holds a pointer grab: a menu or any other surface the
+ * client put up with an explicit grab, which owns the input while it is mapped
+ * and is dismissed by the first click outside it.
+ */
+static bool grabsInput(EffectWindow *w)
+{
+    // hasPopupGrab() lives on KWin::Window, not on the effect window.
+    const Window *window = w->window();
+    return window && window->hasPopupGrab();
+}
+
+/*!
  * Returns whether \a w is a system element: something KWin paints in a layer of
  * its own above the ordinary windows (panels, popups, applet popups, menus,
  * notifications, on screen displays) and that never takes part in the layout, so
@@ -142,7 +154,7 @@ static bool isSystemElement(EffectWindow *w)
     // Internal windows are KWin's own surfaces (its on screen displays and the
     // like); the effect's click targets are internal too and are filtered out by
     // the caller, which is the only place that can tell them apart.
-    return w->internalWindow() || w->isDock() || w->isPopupWindow() || w->isPopupMenu() || w->isDropdownMenu()
+    return grabsInput(w) || w->internalWindow() || w->isDock() || w->isPopupWindow() || w->isPopupMenu() || w->isDropdownMenu()
         || w->isMenu() || w->isAppletPopup() || w->isNotification() || w->isCriticalNotification()
         || w->isOnScreenDisplay() || w->isTooltip() || w->isComboBox() || w->isDNDIcon() || w->isSplash()
         || w->isLockScreen();
@@ -512,6 +524,12 @@ void ThumbnailBloomEffect::relayout()
     // Windows something else is transient for, needed by the "skip parents" setting.
     QSet<EffectWindow *> parents;
     for (EffectWindow *w : stack) {
+        // Only a real window makes its owner a parent. A menu is transient for
+        // the window it was opened in, so counting it would turn that window
+        // into a skipped parent for as long as the menu is up.
+        if (!isRelevant(w)) {
+            continue;
+        }
         const QList<EffectWindow *> mainWindows = w->mainWindows();
         for (EffectWindow *parent : mainWindows) {
             parents.insert(parent);
@@ -952,10 +970,13 @@ bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
     if (!w->isOnCurrentDesktop() || !w->isOnCurrentActivity()) {
         return false;
     }
-    if (w->internalWindow() || w->isDesktop() || w->isDock() || w->isPopupWindow() || w->isPopupMenu()) {
+    // Whatever is painted above the ordinary windows, menus and anything else
+    // holding a grab included, is out of the effect altogether: it neither
+    // blooms nor pushes anything into bloom.
+    if (isSystemElement(w) || w->isDesktop()) {
         return false;
     }
-    if (w->isSplash() || w->isUtility() || w->isToolbar() || w->isOutline() || w->isLockScreen()) {
+    if (w->isUtility() || w->isToolbar() || w->isOutline() || w->isInputMethod()) {
         return false;
     }
 
