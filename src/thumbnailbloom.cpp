@@ -654,8 +654,6 @@ void ThumbnailBloomEffect::scheduleRelayout() { m_relayoutTimer.start(); }
 
 void ThumbnailBloomEffect::relayout()
 {
-    const QList<EffectWindow *> stack = effects->stackingOrder();
-
     // Placing the click targets needs to know what covers them, so this comes
     // first.
     updateSystemRegion();
@@ -674,12 +672,31 @@ void ThumbnailBloomEffect::relayout()
         return;
     }
 
-    // Windows something else is transient for, needed by the "skip parents" setting.
+    // The parents must be complete before the first isEligible call, so this
+    // stays a walk of its own ahead of the layout input.
+    const QSet<EffectWindow *> parents = transientParents();
+
+    // Windows only ever collide with windows of their own screen, so each screen
+    // is laid out on its own. The stacking order is preserved per screen.
+    QHash<LogicalOutput *, QList<LayoutWindow>> perScreen;
+    for (EffectWindow *w : effects->stackingOrder()) {
+        if (!isRelevant(w)) {
+            continue;
+        }
+        perScreen[w->screen()].append(LayoutWindow { w, frameRect(w), isEligible(w, parents),
+            w == effects->activeWindow(), isIgnored(w, parents) });
+    }
+
+    applyPlacements(perScreen);
+}
+
+QSet<EffectWindow *> ThumbnailBloomEffect::transientParents() const
+{
+    // Only a real window makes its owner a parent. A menu is transient for
+    // the window it was opened in, so counting it would turn that window
+    // into a skipped parent for as long as the menu is up.
     QSet<EffectWindow *> parents;
-    for (EffectWindow *w : stack) {
-        // Only a real window makes its owner a parent. A menu is transient for
-        // the window it was opened in, so counting it would turn that window
-        // into a skipped parent for as long as the menu is up.
+    for (EffectWindow *w : effects->stackingOrder()) {
         if (!isRelevant(w)) {
             continue;
         }
@@ -688,18 +705,12 @@ void ThumbnailBloomEffect::relayout()
             parents.insert(parent);
         }
     }
+    return parents;
+}
 
-    // Windows only ever collide with windows of their own screen, so each screen
-    // is laid out on its own. The stacking order is preserved per screen.
-    QHash<LogicalOutput *, QList<LayoutWindow>> perScreen;
-    for (EffectWindow *w : stack) {
-        if (!isRelevant(w)) {
-            continue;
-        }
-        perScreen[w->screen()].append(LayoutWindow { w, frameRect(w),
-            isEligible(w, parents), w == effects->activeWindow(), isIgnored(w, parents) });
-    }
-
+void ThumbnailBloomEffect::applyPlacements(
+    const QHash<LogicalOutput *, QList<LayoutWindow>> &perScreen)
+{
     QSet<EffectWindow *> bloomed;
     for (auto it = perScreen.cbegin(); it != perScreen.cend(); ++it) {
         const QRectF workArea = effects->clientArea(MaximizeArea, it.key());
@@ -859,6 +870,16 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
         return;
     }
 
+    EffectWindow *hovered = thumbnailUnder(pos);
+    for (const auto &[w, state] : m_states) {
+        if (targetable(state)) {
+            setHovered(w, w == hovered);
+        }
+    }
+}
+
+EffectWindow *ThumbnailBloomEffect::thumbnailUnder(const QPointF &pos) const
+{
     // The hit test is against the exposed part of the resting rectangle, never
     // the grown one: the pointer keeps the thumbnail enlarged only while it
     // stays inside the area the thumbnail occupies when it is not hovered.
@@ -872,17 +893,12 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // included: the pointer is on the window, not on a thumbnail it cannot see.
     EffectWindow *hovered = nullptr;
     for (const auto &[w, state] : m_states) {
-        if (targetable(state) && state.hitRegion.contains(pos.toPoint())
+        if (state.overlay && state.overlay->isVisible() && state.hitRegion.contains(pos.toPoint())
             && !m_shieldFilter.isCovered(w->window(), pos) && (!hovered || state.hovered)) {
             hovered = w;
         }
     }
-
-    for (const auto &[w, state] : m_states) {
-        if (targetable(state)) {
-            setHovered(w, w == hovered);
-        }
-    }
+    return hovered;
 }
 
 void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
@@ -1097,15 +1113,8 @@ void ThumbnailBloomEffect::updateShields()
             // stay out of the way under somebody else's shield.
             bloomedWindows.insert(w->window());
 
-            const QRegion exposed = QRegion(frame) - covered - thumbnails;
+            const QRegion exposed = placeShield(state, frame, covered + thumbnails);
             if (!exposed.isEmpty()) {
-                if (!state.shield) {
-                    state.shield = std::make_unique<OverlayWindow>();
-                }
-                const QRect bounds = exposed.boundingRect();
-                state.shield->setGeometry(bounds);
-                state.shield->setMask(exposed.translated(-bounds.topLeft()));
-                showOverlay(state.shield.get());
                 shielded.insert(w);
                 shieldRegion += exposed;
             }
@@ -1126,6 +1135,23 @@ void ThumbnailBloomEffect::updateShields()
     }
 
     m_shieldFilter.setState(shieldRegion, bloomedWindows, thumbnailAreas);
+}
+
+QRegion ThumbnailBloomEffect::placeShield(
+    BloomState &state, const QRect &frame, const QRegion &covered)
+{
+    const QRegion exposed = QRegion(frame) - covered;
+    if (exposed.isEmpty()) {
+        return exposed;
+    }
+    if (!state.shield) {
+        state.shield = std::make_unique<OverlayWindow>();
+    }
+    const QRect bounds = exposed.boundingRect();
+    state.shield->setGeometry(bounds);
+    state.shield->setMask(exposed.translated(-bounds.topLeft()));
+    showOverlay(state.shield.get());
+    return exposed;
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,6 +1346,22 @@ void ThumbnailBloomEffect::applyTransform(
 
 void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 {
+    const std::vector<EffectWindow *> settledBack = advanceAnimations(data);
+    updateLift();
+
+    // forget(), not erase(): the click target may still be up, painting the last
+    // of the caption, and an internal window may not be destroyed from inside the
+    // effect chain. forget() cuts its signals now and lets it die on the next
+    // event loop pass.
+    for (EffectWindow *w : settledBack) {
+        forget(w);
+    }
+
+    Effect::prePaintScreen(data);
+}
+
+std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePaintData &data)
+{
     m_animating = false;
 
     std::vector<EffectWindow *> settledBack;
@@ -1346,6 +1388,11 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         }
     }
 
+    return settledBack;
+}
+
+void ThumbnailBloomEffect::updateLift()
+{
     // A thumbnail is lifted while the pointer has it grown, and stays lifted
     // until it has shrunk all the way back: the hover is over the moment the
     // pointer leaves, but the way back takes a whole animation, and dropping the
@@ -1405,16 +1452,6 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         }
     }
     m_liftPending = m_liftAnchor != nullptr;
-
-    // forget(), not erase(): the click target may still be up, painting the last
-    // of the caption, and an internal window may not be destroyed from inside the
-    // effect chain. forget() cuts its signals now and lets it die on the next
-    // event loop pass.
-    for (EffectWindow *w : settledBack) {
-        forget(w);
-    }
-
-    Effect::prePaintScreen(data);
 }
 
 void ThumbnailBloomEffect::prePaintWindow(

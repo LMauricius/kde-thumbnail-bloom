@@ -13,6 +13,7 @@
 #include <effect/timeline.h>
 #include <input.h>
 
+#include <QHash>
 #include <QPointer>
 #include <QRegion>
 #include <QRectF>
@@ -225,6 +226,17 @@ private:
 
     /*! Rebuilds the layout of every screen and retargets the animations. */
     void relayout();
+    /*!
+     * Returns every window a relevant window is transient for, which is what
+     * the "skip parents" setting works on.
+     */
+    QSet<KWin::EffectWindow *> transientParents() const;
+    /*!
+     * Retargets every placed window towards its thumbnail, sends the rest of
+     * the bloomed ones home, and refreshes the shields and the hover, in that
+     * order.
+     */
+    void applyPlacements(const QHash<KWin::LogicalOutput *, QList<LayoutWindow>> &perScreen);
     /*! Queues a relayout for the next event loop pass, coalescing bursts of changes. */
     void scheduleRelayout();
     /*! Starts or retargets the animation of \a w towards \a base, grown if hovered. */
@@ -235,6 +247,8 @@ private:
     void openWindowMenu(KWin::EffectWindow *w, const QPointF &pos);
     /*! Marks the topmost thumbnail whose exposed area holds \a pos as hovered, and the rest as not. */
     void updateHover(const QPointF &pos);
+    /*! Returns the thumbnail the pointer at \a pos is usably on, or nullptr. */
+    KWin::EffectWindow *thumbnailUnder(const QPointF &pos) const;
     /*! Marks the thumbnail of \a w as hovered or not and animates it accordingly. */
     void setHovered(KWin::EffectWindow *w, bool hovered);
     /*!
@@ -274,6 +288,15 @@ private:
     /*! Applies the thumbnail transformation of \a state to \a data. */
     void applyTransform(
         KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
+    /*!
+     * Advances every timeline one frame, interpolates the four channels, and
+     * pushes the caption opacity into the click targets. Sets m_animating and
+     * returns the windows whose thumbnails have arrived back at their real
+     * geometry, for the caller to forget.
+     */
+    std::vector<KWin::EffectWindow *> advanceAnimations(KWin::ScreenPrePaintData &data);
+    /*! Rebuilds m_lifted (least enlarged first) and picks the anchor their redraw follows. */
+    void updateLift();
     /*! Whether \a w is one of the thumbnails drawn above the windows covering them. */
     bool isLifted(KWin::EffectWindow *w) const;
     /*! Draws the lifted thumbnails, least enlarged first, if they are still due in this pass. */
@@ -301,6 +324,12 @@ private:
         KWin::EffectWindow *w);
     /*! Puts a shield on the part of every bloomed window that would still take input. */
     void updateShields();
+    /*!
+     * Puts \a state's shield over the part of \a frame not in \a covered, and
+     * returns that part. An empty result places nothing and leaves any old
+     * shield alone; updateShields() drops the stale ones in one place.
+     */
+    QRegion placeShield(BloomState &state, const QRect &frame, const QRegion &covered);
 
     // --- window classification ---
 
