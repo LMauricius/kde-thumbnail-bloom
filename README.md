@@ -54,6 +54,7 @@ Found under System Settings, Desktop Effects, next to the effect's entry.
 | Setting                   | Default     | Meaning                                                    |
 | ------------------------- | ----------- | ---------------------------------------------------------- |
 | Windows kept above others | skipped     | Windows with "Keep above others" stay where they are.      |
+| Windows on all desktops   | skipped     | Windows shown on every desktop stay where they are.        |
 | Maximized windows         | skipped     | Maximized and fullscreen windows stay where they are.      |
 | Parent windows            | skipped     | Windows that own a dialog stay where they are.             |
 | Child windows             | not skipped | Dialogs and other transient windows may become thumbnails. |
@@ -62,6 +63,9 @@ Found under System Settings, Desktop Effects, next to the effect's entry.
 | Window icons              | shown       | Icon drawn to the left of the title of each thumbnail.     |
 | Window titles             | shown       | Title drawn on a plate at the bottom of each thumbnail.    |
 | Thumbnail opacity         | 70%         | Opacity of a thumbnail; a hovered one fades to opaque.     |
+
+A skipped window stays out of the effect altogether: it never becomes a thumbnail, and it never
+pushes another window into one, however much of it the skipped window covers.
 
 The icon and the title fade out while a thumbnail is hovered, and a thumbnail too small to hold them
 goes without.

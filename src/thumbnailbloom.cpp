@@ -415,6 +415,7 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
     ThumbnailBloomConfig::self()->read();
 
     m_skipKeepAbove = ThumbnailBloomConfig::skipKeepAbove();
+    m_skipOnAllDesktops = ThumbnailBloomConfig::skipOnAllDesktops();
     m_skipMaximized = ThumbnailBloomConfig::skipMaximized();
     m_skipParents = ThumbnailBloomConfig::skipParents();
     m_skipChildren = ThumbnailBloomConfig::skipChildren();
@@ -997,6 +998,9 @@ void ThumbnailBloomEffect::updateSystemRegion()
 bool ThumbnailBloomEffect::isIgnored(EffectWindow *w, const QSet<EffectWindow *> &parents) const
 {
     if (m_skipKeepAbove && w->keepAbove()) {
+        return true;
+    }
+    if (m_skipOnAllDesktops && w->isOnAllDesktops()) {
         return true;
     }
     if (m_skipMaximized && isMaximized(w)) {

@@ -236,6 +236,7 @@ private:
     KWin::EffectWindow *m_liftAnchor = nullptr; //!< window it is drawn right after
     bool m_liftPending = false; //!< whether it still has to be drawn in this pass
     bool m_skipKeepAbove = true;
+    bool m_skipOnAllDesktops = true;
     bool m_skipMaximized = true;
     bool m_skipParents = true;
     bool m_skipChildren = false;

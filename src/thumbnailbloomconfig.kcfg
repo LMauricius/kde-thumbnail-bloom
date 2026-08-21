@@ -9,6 +9,10 @@
             <label>Skip windows that are kept above others</label>
             <default>true</default>
         </entry>
+        <entry name="SkipOnAllDesktops" type="Bool">
+            <label>Skip windows that are on all desktops</label>
+            <default>true</default>
+        </entry>
         <entry name="SkipMaximized" type="Bool">
             <label>Skip maximized windows</label>
             <default>true</default>
