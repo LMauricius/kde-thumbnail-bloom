@@ -14,8 +14,7 @@
 
 K_PLUGIN_CLASS(ThumbnailBloom::ThumbnailBloomEffectConfig)
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 ThumbnailBloomEffectConfig::ThumbnailBloomEffectConfig(QObject *parent, const KPluginMetaData &data)
     : KCModule(parent, data)
@@ -28,11 +27,10 @@ void ThumbnailBloomEffectConfig::save()
 {
     KCModule::save();
 
-    QDBusMessage message = QDBusMessage::createMethodCall(QStringLiteral("org.kde.KWin"),
-                                                          QStringLiteral("/Effects"),
-                                                          QStringLiteral("org.kde.kwin.Effects"),
-                                                          QStringLiteral("reconfigureEffect"));
-    message.setArguments({QStringLiteral("thumbnailbloom")});
+    QDBusMessage message
+        = QDBusMessage::createMethodCall(QStringLiteral("org.kde.KWin"), QStringLiteral("/Effects"),
+            QStringLiteral("org.kde.kwin.Effects"), QStringLiteral("reconfigureEffect"));
+    message.setArguments({ QStringLiteral("thumbnailbloom") });
     QDBusConnection::sessionBus().send(message);
 }
 

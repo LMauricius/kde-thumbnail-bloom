@@ -9,8 +9,7 @@
 #include <QList>
 #include <QRectF>
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 /*!
  * One window as seen by the layout pass. Deliberately free of any KWin type so
@@ -22,7 +21,8 @@ struct LayoutWindow
     QRectF geometry; //!< where the window currently is on screen
     bool eligible = false; //!< whether this window may be turned into a thumbnail
     bool reserved = false; //!< whether no thumbnail may ever be placed over this window
-    bool ignored = false; //!< whether the settings exempt this window from the effect entirely; overrides both flags above
+    bool ignored
+        = false; //!< whether the settings exempt this window from the effect entirely; overrides both flags above
 };
 
 /*!
@@ -71,6 +71,7 @@ struct Placement
  * windows the smallest thumbnail still finds no room for are absent from the
  * result.
  */
-QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options);
+QList<Placement> computeLayout(
+    const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options);
 
 } // namespace ThumbnailBloom

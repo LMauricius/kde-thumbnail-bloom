@@ -12,8 +12,7 @@
 #include <QString>
 #include <QTimer>
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 /*!
  * A transparent, focus-less window that swallows every pointer event on it.

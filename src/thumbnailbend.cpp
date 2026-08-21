@@ -12,8 +12,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 /*!
  * How far the eye sits from the thumbnail, in multiples of its longer side.
@@ -26,14 +25,11 @@ namespace ThumbnailBloom
 constexpr qreal viewDistance = 2.0;
 
 /*! Returns the dot product of \a a and \a b. */
-static qreal dot(const QPointF &a, const QPointF &b)
-{
-    return a.x() * b.x() + a.y() * b.y();
-}
+static qreal dot(const QPointF &a, const QPointF &b) { return a.x() * b.x() + a.y() * b.y(); }
 
 BendQuad bendQuad(const QRectF &rect, qreal angle, const QVector2D &direction)
 {
-    const BendQuad flat{rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()};
+    const BendQuad flat { rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft() };
 
     const qreal length = std::hypot(direction.x(), direction.y());
     if (rect.isEmpty() || qFuzzyIsNull(angle) || qFuzzyIsNull(length)) {
@@ -85,7 +81,7 @@ BendQuad bendQuad(const QRectF &rect, qreal angle, const QVector2D &direction)
     const qreal scaleY = rect.height() / bounds.height();
     for (QPointF &corner : bent) {
         corner = QPointF(rect.x() + (corner.x() - bounds.x()) * scaleX,
-                         rect.y() + (corner.y() - bounds.y()) * scaleY);
+            rect.y() + (corner.y() - bounds.y()) * scaleY);
     }
 
     return bent;
@@ -98,10 +94,12 @@ QTransform bendTransform(const QRectF &rect, qreal angle, const QVector2D &direc
     }
 
     const BendQuad bent = bendQuad(rect, angle, direction);
-    const QPolygonF flat({rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()});
+    const QPolygonF flat(
+        { rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft() });
 
     QTransform transform;
-    if (!QTransform::quadToQuad(flat, QPolygonF({bent[0], bent[1], bent[2], bent[3]}), transform)) {
+    if (!QTransform::quadToQuad(
+            flat, QPolygonF({ bent[0], bent[1], bent[2], bent[3] }), transform)) {
         return QTransform();
     }
     return transform;

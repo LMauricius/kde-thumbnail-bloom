@@ -1,0 +1,22 @@
+---
+# KDE Frameworks style, trimmed to what this project needs.
+BasedOnStyle: WebKit
+Standard: c++20
+ColumnLimit: 100
+IndentWidth: 4
+PointerAlignment: Right
+# Function/class braces on their own line, control-flow braces attached.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterStruct: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterUnion: true
+  SplitEmptyFunction: false
+AlwaysBreakTemplateDeclarations: Yes
+FixNamespaceComments: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+# Leave the include order and the prose comments alone.
+SortIncludes: Never
+ReflowComments: false

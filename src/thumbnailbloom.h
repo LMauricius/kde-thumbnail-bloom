@@ -22,8 +22,7 @@
 #include <vector>
 #include <unordered_map>
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 class OverlayWindow;
 class ThumbnailOverlay;
@@ -64,7 +63,8 @@ public:
      * to its own window, so every button that means nothing on a thumbnail is
      * dropped there rather than handed to whatever it is painted over.
      */
-    void setState(const QRegion &shields, const QSet<KWin::Window *> &bloomed, const QList<Thumbnail> &thumbnails);
+    void setState(const QRegion &shields, const QSet<KWin::Window *> &bloomed,
+        const QList<Thumbnail> &thumbnails);
 
     /*!
      * Whether \a window is hidden at \a pos by a window painted over it.
@@ -155,9 +155,13 @@ public:
     void reconfigure(ReconfigureFlags flags) override;
 
     void prePaintScreen(KWin::ScreenPrePaintData &data) override;
-    void prePaintWindow(KWin::RenderView *view, KWin::EffectWindow *w, KWin::WindowPrePaintData &data) override;
-    void paintScreen(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, int mask, const KWin::Region &deviceRegion, KWin::LogicalOutput *screen) override;
-    void paintWindow(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, KWin::EffectWindow *w, int mask, const KWin::Region &deviceRegion, KWin::WindowPaintData &data) override;
+    void prePaintWindow(
+        KWin::RenderView *view, KWin::EffectWindow *w, KWin::WindowPrePaintData &data) override;
+    void paintScreen(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+        int mask, const KWin::Region &deviceRegion, KWin::LogicalOutput *screen) override;
+    void paintWindow(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+        KWin::EffectWindow *w, int mask, const KWin::Region &deviceRegion,
+        KWin::WindowPaintData &data) override;
     void postPaintScreen() override;
 
     bool isActive() const override;
@@ -182,13 +186,17 @@ private:
         qreal currentCaption = 0.0; //!< caption opacity the click target paints with
         qreal fromBend = 0.0; //!< bend strength the running animation started at
         qreal toBend = 0.0; //!< bend strength the animation ends at
-        qreal currentBend = 0.0; //!< bend strength the current frame is drawn with, 0 flat, 1 full angle
-        bool redirected = false; //!< whether the window is being painted through an offscreen texture
+        qreal currentBend
+            = 0.0; //!< bend strength the current frame is drawn with, 0 flat, 1 full angle
+        bool redirected
+            = false; //!< whether the window is being painted through an offscreen texture
         bool hovered = false; //!< whether the pointer is on the thumbnail
-        QRegion hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
+        QRegion
+            hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay;
-        std::unique_ptr<OverlayWindow> shield; //!< swallows the input the vacated real geometry would still get
+        std::unique_ptr<OverlayWindow>
+            shield; //!< swallows the input the vacated real geometry would still get
     };
 
     // --- state handling ---
@@ -228,11 +236,13 @@ private:
      * single quad would be textured as if it were flat, and only cutting it into
      * a grid small enough makes the pixels follow the perspective.
      */
-    void apply(KWin::EffectWindow *window, int mask, KWin::WindowPaintData &data, KWin::WindowQuadList &quads) override;
+    void apply(KWin::EffectWindow *window, int mask, KWin::WindowPaintData &data,
+        KWin::WindowQuadList &quads) override;
     /*! Redirects \a w into an offscreen texture, or stops doing so, as \a redirected asks. */
     void setRedirected(KWin::EffectWindow *w, BloomState &state, bool redirected);
     /*! Applies the thumbnail transformation of \a state to \a data. */
-    void applyTransform(KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
+    void applyTransform(
+        KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
     /*! Whether \a w is one of the thumbnails drawn above the windows covering them. */
     bool isLifted(KWin::EffectWindow *w) const;
     /*! Draws the lifted thumbnails, least enlarged first, if they are still due in this pass. */
@@ -245,7 +255,8 @@ private:
      * is turned by the same bend as the pixels of the thumbnail and needs the
      * strength this frame is drawn with.
      */
-    void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, KWin::EffectWindow *w, const BloomState &state) const;
+    void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+        KWin::EffectWindow *w, const BloomState &state) const;
     /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
     /*!
@@ -255,7 +266,8 @@ private:
      * puts the caption at the depth of the thumbnail rather than at the top of
      * the screen, where the layer of an internal window would otherwise keep it.
      */
-    void drawCaption(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, KWin::EffectWindow *w);
+    void drawCaption(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+        KWin::EffectWindow *w);
     /*! Puts a shield on the part of every bloomed window that would still take input. */
     void updateShields();
 
@@ -287,16 +299,20 @@ private:
     bool m_showIcons = true;
     bool m_showTitles = true;
     qreal m_thumbnailOpacity = 0.7; //!< opacity of a thumbnail that is not hovered
-    qreal m_bendAngle = 45.0; //!< angle a resting thumbnail is turned by, in degrees; 0 keeps them flat
+    qreal m_bendAngle
+        = 45.0; //!< angle a resting thumbnail is turned by, in degrees; 0 keeps them flat
     LayoutOptions m_layoutOptions;
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
     ShieldFilter m_shieldFilter;
     TouchDragFilter m_touchDragFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints
-    KWin::EffectWindow *m_menuOwner = nullptr; //!< window whose menu is open, kept focused meanwhile
+    KWin::EffectWindow *m_menuOwner
+        = nullptr; //!< window whose menu is open, kept focused meanwhile
     KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing
-    std::vector<KWin::EffectWindow *> m_lifted; //!< thumbnails drawn above the other windows, least enlarged first
-    KWin::EffectWindow *m_liftAnchor = nullptr; //!< window they are drawn right after, possibly one of them
+    std::vector<KWin::EffectWindow *>
+        m_lifted; //!< thumbnails drawn above the other windows, least enlarged first
+    KWin::EffectWindow *m_liftAnchor
+        = nullptr; //!< window they are drawn right after, possibly one of them
     bool m_liftPending = false; //!< whether they still have to be drawn in this pass
     bool m_skipKeepAbove = true;
     bool m_skipOnAllDesktops = true;

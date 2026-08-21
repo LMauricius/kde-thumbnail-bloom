@@ -37,8 +37,7 @@
 
 using namespace KWin;
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -83,10 +82,9 @@ static QVector2D bendDirection(EffectWindow *w, const QRectF &rect)
 static QRectF interpolateRect(const QRectF &from, const QRectF &to, qreal progress)
 {
     const qreal inverse = 1.0 - progress;
-    return QRectF(from.x() * inverse + to.x() * progress,
-                  from.y() * inverse + to.y() * progress,
-                  from.width() * inverse + to.width() * progress,
-                  from.height() * inverse + to.height() * progress);
+    return QRectF(from.x() * inverse + to.x() * progress, from.y() * inverse + to.y() * progress,
+        from.width() * inverse + to.width() * progress,
+        from.height() * inverse + to.height() * progress);
 }
 
 /*!
@@ -101,12 +99,15 @@ static QRectF interpolateRect(const QRectF &from, const QRectF &to, qreal progre
 static QRectF grownRect(const QRectF &rect, const QRectF &natural, const QRectF &area)
 {
     const QSizeF size(std::max(rect.width(), (rect.width() + natural.width()) / 2),
-                      std::max(rect.height(), (rect.height() + natural.height()) / 2));
-    QRectF grown(QPointF(rect.center().x() - size.width() / 2, rect.center().y() - size.height() / 2), size);
+        std::max(rect.height(), (rect.height() + natural.height()) / 2));
+    QRectF grown(
+        QPointF(rect.center().x() - size.width() / 2, rect.center().y() - size.height() / 2), size);
 
     // Only shift the result: resizing it again would break the superset property.
-    grown.moveLeft(std::min(std::max(grown.left(), area.left()), std::max(area.right() - grown.width(), area.left())));
-    grown.moveTop(std::min(std::max(grown.top(), area.top()), std::max(area.bottom() - grown.height(), area.top())));
+    grown.moveLeft(std::min(
+        std::max(grown.left(), area.left()), std::max(area.right() - grown.width(), area.left())));
+    grown.moveTop(std::min(
+        std::max(grown.top(), area.top()), std::max(area.bottom() - grown.height(), area.top())));
     return grown;
 }
 
@@ -139,9 +140,8 @@ static QRectF thumbnailBounds(EffectWindow *w, const QRectF &rect)
     const qreal scaleY = rect.height() / natural.height();
     const QRectF expanded = w->expandedGeometry();
     return QRectF(rect.x() + (expanded.x() - natural.x()) * scaleX,
-                  rect.y() + (expanded.y() - natural.y()) * scaleY,
-                  expanded.width() * scaleX,
-                  expanded.height() * scaleY);
+        rect.y() + (expanded.y() - natural.y()) * scaleY, expanded.width() * scaleX,
+        expanded.height() * scaleY);
 }
 
 //! Width of the hover outline, in logical pixels.
@@ -160,14 +160,17 @@ static void appendQuad(std::vector<QVector2D> &vertices, const std::array<QPoint
     const QVector2D topRight(corners[1]);
     const QVector2D bottomRight(corners[2]);
     const QVector2D bottomLeft(corners[3]);
-    vertices.insert(vertices.end(), {topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight});
+    vertices.insert(
+        vertices.end(), { topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight });
 }
 
 /*! Returns the outline colour of the current colour scheme. */
 static QColor outlineColor()
 {
     // Read on every use: the colour scheme can change while the effect runs.
-    return KColorScheme(QPalette::Active, KColorScheme::View).decoration(KColorScheme::FocusColor).color();
+    return KColorScheme(QPalette::Active, KColorScheme::View)
+        .decoration(KColorScheme::FocusColor)
+        .color();
 }
 
 /*!
@@ -200,9 +203,10 @@ static bool isSystemElement(EffectWindow *w)
     // Internal windows are KWin's own surfaces (its on screen displays and the
     // like); the effect's click targets are internal too and are filtered out by
     // the caller, which is the only place that can tell them apart.
-    return grabsInput(w) || w->internalWindow() || w->isDock() || w->isPopupWindow() || w->isPopupMenu() || w->isDropdownMenu()
-        || w->isMenu() || w->isAppletPopup() || w->isNotification() || w->isCriticalNotification()
-        || w->isOnScreenDisplay() || w->isTooltip() || w->isComboBox() || w->isDNDIcon() || w->isSplash()
+    return grabsInput(w) || w->internalWindow() || w->isDock() || w->isPopupWindow()
+        || w->isPopupMenu() || w->isDropdownMenu() || w->isMenu() || w->isAppletPopup()
+        || w->isNotification() || w->isCriticalNotification() || w->isOnScreenDisplay()
+        || w->isTooltip() || w->isComboBox() || w->isDNDIcon() || w->isSplash()
         || w->isLockScreen();
 }
 
@@ -224,9 +228,10 @@ static bool isInputTarget(EffectWindow *w)
 
 /*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
 /*! Whether the user is dragging a window around right now. */
-static bool userMoveInProgress() {
-  const Window *window = workspace()->moveResizeWindow();
-  return window && window->isInteractiveMove();
+static bool userMoveInProgress()
+{
+    const Window *window = workspace()->moveResizeWindow();
+    return window && window->isInteractiveMove();
 }
 
 /*!
@@ -271,10 +276,10 @@ static bool sameRect(const QRectF &a, const QRectF &b)
 
 ShieldFilter::ShieldFilter()
     : InputEventFilter(InputFilterOrder::Popup)
-{
-}
+{ }
 
-void ShieldFilter::setState(const QRegion &shields, const QSet<Window *> &bloomed, const QList<Thumbnail> &thumbnails)
+void ShieldFilter::setState(
+    const QRegion &shields, const QSet<Window *> &bloomed, const QList<Thumbnail> &thumbnails)
 {
     m_shields = shields;
     m_bloomed = bloomed;
@@ -291,10 +296,12 @@ Window *ShieldFilter::windowBelow(const QPointF &pos) const
     const QList<Window *> &stacking = workspace()->stackingOrder();
     for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
         Window *window = *it;
-        if (window->isDeleted() || window->isMinimized() || window->isHidden() || window->isHiddenByShowDesktop()) {
+        if (window->isDeleted() || window->isMinimized() || window->isHidden()
+            || window->isHiddenByShowDesktop()) {
             continue;
         }
-        if (!window->isOnCurrentActivity() || !window->isOnCurrentDesktop() || !window->readyForPainting()) {
+        if (!window->isOnCurrentActivity() || !window->isOnCurrentDesktop()
+            || !window->readyForPainting()) {
             continue;
         }
         if (window->isInternal() || m_bloomed.contains(window)) {
@@ -326,10 +333,12 @@ bool ShieldFilter::isCovered(Window *window, const QPointF &pos) const
         if (candidate == window) {
             return false;
         }
-        if (candidate->isDeleted() || candidate->isMinimized() || candidate->isHidden() || candidate->isHiddenByShowDesktop()) {
+        if (candidate->isDeleted() || candidate->isMinimized() || candidate->isHidden()
+            || candidate->isHiddenByShowDesktop()) {
             continue;
         }
-        if (!candidate->isOnCurrentActivity() || !candidate->isOnCurrentDesktop() || !candidate->readyForPainting()) {
+        if (!candidate->isOnCurrentActivity() || !candidate->isOnCurrentDesktop()
+            || !candidate->readyForPainting()) {
             continue;
         }
         if (candidate->isInternal() || m_bloomed.contains(candidate)) {
@@ -346,9 +355,8 @@ bool ShieldFilter::isCovered(Window *window, const QPointF &pos) const
 const ShieldFilter::Thumbnail *ShieldFilter::thumbnailAt(const QPointF &pos) const
 {
     // The click targets never overlap, so the first hit is the only one.
-    const auto it = std::find_if(m_thumbnails.cbegin(), m_thumbnails.cend(), [&pos](const Thumbnail &thumbnail) {
-        return thumbnail.region.contains(pos.toPoint());
-    });
+    const auto it = std::find_if(m_thumbnails.cbegin(), m_thumbnails.cend(),
+        [&pos](const Thumbnail &thumbnail) { return thumbnail.region.contains(pos.toPoint()); });
     return it != m_thumbnails.cend() ? &(*it) : nullptr;
 }
 
@@ -424,8 +432,7 @@ bool ShieldFilter::touchDown(TouchDownEvent *event)
 
 TouchDragFilter::TouchDragFilter()
     : InputEventFilter(InputFilterOrder::Effects)
-{
-}
+{ }
 
 void TouchDragFilter::arm(Window *window, qint32 id)
 {
@@ -516,36 +523,30 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
         forget(w);
         scheduleRelayout();
     });
-    connect(effects, &EffectsHandler::windowDeleted, this, [this](EffectWindow *w) {
-        forget(w);
-    });
-    connect(effects, &EffectsHandler::windowActivated, this, [this](EffectWindow *) {
-        scheduleRelayout();
-    });
-    connect(effects, &EffectsHandler::stackingOrderChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
+    connect(effects, &EffectsHandler::windowDeleted, this, [this](EffectWindow *w) { forget(w); });
+    connect(effects, &EffectsHandler::windowActivated, this,
+        [this](EffectWindow *) { scheduleRelayout(); });
+    connect(effects, &EffectsHandler::stackingOrderChanged, this,
+        &ThumbnailBloomEffect::scheduleRelayout);
     // No per-window signal exists for the "show desktop" hidden flag.
-    connect(effects, &EffectsHandler::showingDesktopChanged, this, [this](bool) {
-        scheduleRelayout();
-    });
-    connect(effects, &EffectsHandler::currentActivityChanged, this, [this](const QString &) {
-        scheduleRelayout();
-    });
-    connect(effects, &EffectsHandler::desktopChanged, this, [this](VirtualDesktop *, VirtualDesktop *, EffectWindow *, LogicalOutput *) {
-        scheduleRelayout();
-    });
-    connect(effects, &EffectsHandler::screenAdded, this, [this](LogicalOutput *) {
-        scheduleRelayout();
-    });
-    connect(effects, &EffectsHandler::screenRemoved, this, [this](LogicalOutput *) {
-        scheduleRelayout();
-    });
+    connect(effects, &EffectsHandler::showingDesktopChanged, this,
+        [this](bool) { scheduleRelayout(); });
+    connect(effects, &EffectsHandler::currentActivityChanged, this,
+        [this](const QString &) { scheduleRelayout(); });
+    connect(effects, &EffectsHandler::desktopChanged, this,
+        [this](VirtualDesktop *, VirtualDesktop *, EffectWindow *, LogicalOutput *) {
+            scheduleRelayout();
+        });
+    connect(effects, &EffectsHandler::screenAdded, this,
+        [this](LogicalOutput *) { scheduleRelayout(); });
+    connect(effects, &EffectsHandler::screenRemoved, this,
+        [this](LogicalOutput *) { scheduleRelayout(); });
 
     // Hover is tracked from the cursor position rather than from the overlays:
     // KWin dispatches pointer events to internal windows on its own and never
     // synthesises the enter and leave events a QWindow would otherwise receive.
-    connect(Cursors::self(), &Cursors::positionChanged, this, [this](Cursor *, const QPointF &pos) {
-        updateHover(pos);
-    });
+    connect(Cursors::self(), &Cursors::positionChanged, this,
+        [this](Cursor *, const QPointF &pos) { updateHover(pos); });
 
     for (EffectWindow *w : effects->stackingOrder()) {
         watch(w);
@@ -580,11 +581,14 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
     m_skipParents = ThumbnailBloomConfig::skipParents();
     m_skipChildren = ThumbnailBloomConfig::skipChildren();
 
-    m_layoutOptions.initialScale = std::clamp(ThumbnailBloomConfig::initialSize() / 100.0, 0.1, 1.0);
-    m_layoutOptions.minScale = std::clamp(ThumbnailBloomConfig::minimumSize() / 100.0, 0.05, m_layoutOptions.initialScale);
+    m_layoutOptions.initialScale
+        = std::clamp(ThumbnailBloomConfig::initialSize() / 100.0, 0.1, 1.0);
+    m_layoutOptions.minScale = std::clamp(
+        ThumbnailBloomConfig::minimumSize() / 100.0, 0.05, m_layoutOptions.initialScale);
     m_layoutOptions.scaleStep = 0.05;
     m_layoutOptions.margin = 8;
-    m_layoutOptions.minOccludedFraction = std::clamp(ThumbnailBloomConfig::minimumOcclusion() / 100.0, 0.01, 1.0);
+    m_layoutOptions.minOccludedFraction
+        = std::clamp(ThumbnailBloomConfig::minimumOcclusion() / 100.0, 0.01, 1.0);
 
     m_showIcons = ThumbnailBloomConfig::showIcons();
     m_showTitles = ThumbnailBloomConfig::showTitles();
@@ -600,7 +604,8 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
     }
 
     // The system's animation speed is already folded into animationTime().
-    m_animationDuration = std::max(std::chrono::milliseconds(1), animationTime(std::chrono::milliseconds(250)));
+    m_animationDuration
+        = std::max(std::chrono::milliseconds(1), animationTime(std::chrono::milliseconds(250)));
 
     scheduleRelayout();
 }
@@ -608,23 +613,30 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
 void ThumbnailBloomEffect::watch(EffectWindow *w)
 {
     // Anything that can change what covers what invalidates the layout.
-    connect(w, &EffectWindow::windowFrameGeometryChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
-    connect(w, &EffectWindow::windowMaximizedStateChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
-    connect(w, &EffectWindow::windowFullScreenChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
-    connect(w, &EffectWindow::windowKeepAboveChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
+    connect(w, &EffectWindow::windowFrameGeometryChanged, this,
+        &ThumbnailBloomEffect::scheduleRelayout);
+    connect(w, &EffectWindow::windowMaximizedStateChanged, this,
+        &ThumbnailBloomEffect::scheduleRelayout);
+    connect(
+        w, &EffectWindow::windowFullScreenChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
+    connect(
+        w, &EffectWindow::windowKeepAboveChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
     connect(w, &EffectWindow::minimizedChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
     connect(w, &EffectWindow::windowDesktopsChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
     connect(w, &EffectWindow::windowHiddenChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
     connect(w, &EffectWindow::windowModalityChanged, this, &ThumbnailBloomEffect::scheduleRelayout);
-    connect(w, &EffectWindow::windowStartUserMovedResized, this, &ThumbnailBloomEffect::scheduleRelayout);
-    connect(w, &EffectWindow::windowFinishUserMovedResized, this, &ThumbnailBloomEffect::scheduleRelayout);
+    connect(w, &EffectWindow::windowStartUserMovedResized, this,
+        &ThumbnailBloomEffect::scheduleRelayout);
+    connect(w, &EffectWindow::windowFinishUserMovedResized, this,
+        &ThumbnailBloomEffect::scheduleRelayout);
 
     // A thumbnail is painted away from the window it belongs to, so the damage
     // KWin schedules for the window itself does not cover it.
     connect(w, &EffectWindow::windowDamaged, this, [this](EffectWindow *window) {
         const auto it = m_states.find(window);
         if (it != m_states.end()) {
-            effects->addRepaint(RectF(thumbnailBounds(window, it->second.current).adjusted(-1, -1, 1, 1)));
+            effects->addRepaint(
+                RectF(thumbnailBounds(window, it->second.current).adjusted(-1, -1, 1, 1)));
         }
     });
 }
@@ -633,10 +645,7 @@ void ThumbnailBloomEffect::watch(EffectWindow *w)
 // Layout
 // ---------------------------------------------------------------------------
 
-void ThumbnailBloomEffect::scheduleRelayout()
-{
-    m_relayoutTimer.start();
-}
+void ThumbnailBloomEffect::scheduleRelayout() { m_relayoutTimer.start(); }
 
 void ThumbnailBloomEffect::relayout()
 {
@@ -652,13 +661,12 @@ void ThumbnailBloomEffect::relayout()
     // real geometry and has to keep following the pointer. The finish signal
     // schedules the pass that catches the layout up.
     if (reducedMotion && userMoveInProgress()) {
-      for (auto &[w, state] : m_states) {
-        retarget(w, w->isUserMove() ? QRectF(w->frameGeometry())
-                                    : QRectF(state.base));
-      }
-      updateShields();
-      updateHover(effects->cursorPos());
-      return;
+        for (auto &[w, state] : m_states) {
+            retarget(w, w->isUserMove() ? QRectF(w->frameGeometry()) : QRectF(state.base));
+        }
+        updateShields();
+        updateHover(effects->cursorPos());
+        return;
     }
 
     // Windows something else is transient for, needed by the "skip parents" setting.
@@ -683,11 +691,8 @@ void ThumbnailBloomEffect::relayout()
         if (!isRelevant(w)) {
             continue;
         }
-        perScreen[w->screen()].append(LayoutWindow{w,
-                                                   QRectF(w->frameGeometry()),
-                                                   isEligible(w, parents),
-                                                   w == effects->activeWindow(),
-                                                   isIgnored(w, parents)});
+        perScreen[w->screen()].append(LayoutWindow { w, QRectF(w->frameGeometry()),
+            isEligible(w, parents), w == effects->activeWindow(), isIgnored(w, parents) });
     }
 
     QSet<EffectWindow *> bloomed;
@@ -757,7 +762,8 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
         state.fromCaption = state.currentCaption = state.toCaption = 0.0;
         state.fromBend = state.currentBend = state.toBend = 0.0;
     } else if (sameRect(state.to, target) && qFuzzyCompare(state.toOpacity, targetOpacity)
-               && qFuzzyCompare(state.toCaption, targetCaption) && qFuzzyCompare(state.toBend, targetBend)) {
+        && qFuzzyCompare(state.toCaption, targetCaption)
+        && qFuzzyCompare(state.toBend, targetBend)) {
         return;
     }
 
@@ -785,8 +791,8 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     state.fromOpacity = state.currentOpacity;
     state.fromCaption = state.currentCaption;
     state.fromBend = state.currentBend;
-    state.timeline.setEasingCurve((inserted || state.timeline.done()) ? QEasingCurve::InOutCubic
-                                                                     : QEasingCurve::OutCubic);
+    state.timeline.setEasingCurve(
+        (inserted || state.timeline.done()) ? QEasingCurve::InOutCubic : QEasingCurve::OutCubic);
     state.timeline.setDuration(m_animationDuration);
     state.timeline.reset();
 
@@ -826,9 +832,8 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // Everything with a placed click target takes part, animating or not: the
     // click target sits on the destination of the thumbnail, so the hit test
     // never follows it along its path.
-    const auto targetable = [](const BloomState &state) {
-        return state.overlay && state.overlay->isVisible();
-    };
+    const auto targetable
+        = [](const BloomState &state) { return state.overlay && state.overlay->isVisible(); };
 
     // Reduced motion: a thumbnail growing under the pointer while a window is
     // being dragged is motion nobody asked for, since the pointer is only
@@ -836,10 +841,10 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // drag ends, and the pass the finish signal schedules picks the hover back
     // up from wherever the pointer came to rest.
     if (reducedMotion && userMoveInProgress()) {
-      for (const auto &[w, state] : m_states) {
-        setHovered(w, false);
-      }
-      return;
+        for (const auto &[w, state] : m_states) {
+            setHovered(w, false);
+        }
+        return;
     }
 
     // The menu of a thumbnail belongs to that thumbnail. It is a popup, so it
@@ -927,8 +932,9 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
 
     auto node = m_states.extract(w);
     if (!node.empty()) {
-        for (OverlayWindow *window : {static_cast<OverlayWindow *>(node.mapped().overlay.release()),
-                                      node.mapped().shield.release()}) {
+        for (OverlayWindow *window :
+            { static_cast<OverlayWindow *>(node.mapped().overlay.release()),
+                node.mapped().shield.release() }) {
             if (window) {
                 window->disconnect();
                 window->deleteLater();
@@ -1010,24 +1016,22 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
 
     if (!state.overlay) {
         state.overlay = std::make_unique<ThumbnailOverlay>();
-        connect(state.overlay.get(), &ThumbnailOverlay::activated, this, [w]() {
-            effects->activateWindow(w);
-        });
-        connect(state.overlay.get(), &ThumbnailOverlay::dragStarted, this, [this, w](const QPointF &pos, qint32 touchId) {
-            startThumbnailMove(w, pos, touchId);
-        });
+        connect(state.overlay.get(), &ThumbnailOverlay::activated, this,
+            [w]() { effects->activateWindow(w); });
+        connect(state.overlay.get(), &ThumbnailOverlay::dragStarted, this,
+            [this, w](const QPointF &pos, qint32 touchId) { startThumbnailMove(w, pos, touchId); });
         // The menu command does not activate the window, which is the point: a
         // right click is a question about the thumbnail, not a use of it.
-        connect(state.overlay.get(), &ThumbnailOverlay::menuRequested, this, [this, w](const QPointF &pos) {
-            openWindowMenu(w, pos);
-        });
+        connect(state.overlay.get(), &ThumbnailOverlay::menuRequested, this,
+            [this, w](const QPointF &pos) { openWindowMenu(w, pos); });
     }
 
     state.overlay->setOutputOnly(false);
 
     // The caption is drawn by the click target, which is the one surface of a
     // thumbnail the compositor paints exactly once per frame.
-    state.overlay->setCaption(m_showIcons ? w->icon() : QIcon(), m_showTitles ? w->caption() : QString());
+    state.overlay->setCaption(
+        m_showIcons ? w->icon() : QIcon(), m_showTitles ? w->caption() : QString());
     state.overlay->setCaptionOpacity(state.currentCaption);
 
     // The resting rectangle, never the current one: the click target must not
@@ -1063,7 +1067,7 @@ void ThumbnailBloomEffect::updateShields()
             continue;
         }
         thumbnails += state.hitRegion;
-        thumbnailAreas.append(ShieldFilter::Thumbnail{w->window(), state.hitRegion});
+        thumbnailAreas.append(ShieldFilter::Thumbnail { w->window(), state.hitRegion });
     }
 
     // Walking the stack top down keeps a shield inside the area where its window
@@ -1134,7 +1138,8 @@ bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
 {
     // "Show desktop" hides windows without minimising them, and a window that is
     // not on screen must not get a thumbnail either.
-    if (w->isDeleted() || w->isMinimized() || w->isHidden() || w->isHiddenByShowDesktop() || !w->screen()) {
+    if (w->isDeleted() || w->isMinimized() || w->isHidden() || w->isHiddenByShowDesktop()
+        || !w->screen()) {
         return false;
     }
     if (!w->isOnCurrentDesktop() || !w->isOnCurrentActivity()) {
@@ -1161,9 +1166,8 @@ bool ThumbnailBloomEffect::isCaptionTarget(EffectWindow *w) const
     }
 
     // The shields paint nothing, so only the click targets are of interest.
-    return std::any_of(m_states.begin(), m_states.end(), [handle](const auto &entry) {
-        return entry.second.overlay.get() == handle;
-    });
+    return std::any_of(m_states.begin(), m_states.end(),
+        [handle](const auto &entry) { return entry.second.overlay.get() == handle; });
 }
 
 bool ThumbnailBloomEffect::isOwnOverlay(EffectWindow *w) const
@@ -1253,7 +1257,8 @@ void ThumbnailBloomEffect::setRedirected(EffectWindow *w, BloomState &state, boo
     }
 }
 
-void ThumbnailBloomEffect::apply(EffectWindow *window, int mask, WindowPaintData &data, WindowQuadList &quads)
+void ThumbnailBloomEffect::apply(
+    EffectWindow *window, int mask, WindowPaintData &data, WindowQuadList &quads)
 {
     Q_UNUSED(mask)
     Q_UNUSED(data)
@@ -1275,8 +1280,8 @@ void ThumbnailBloomEffect::apply(EffectWindow *window, int mask, WindowPaintData
         return;
     }
 
-    const QTransform transform = bendTransform(frame, m_bendAngle * bloomState.currentBend,
-                                               bendDirection(window, bloomState.current));
+    const QTransform transform = bendTransform(
+        frame, m_bendAngle * bloomState.currentBend, bendDirection(window, bloomState.current));
 
     // The transform is projective, so mapping a vertex through it is the whole
     // perspective: what the subdivision adds is that every cell of the grid gets
@@ -1295,7 +1300,8 @@ void ThumbnailBloomEffect::apply(EffectWindow *window, int mask, WindowPaintData
     }
 }
 
-void ThumbnailBloomEffect::applyTransform(EffectWindow *w, const BloomState &state, WindowPaintData &data) const
+void ThumbnailBloomEffect::applyTransform(
+    EffectWindow *w, const BloomState &state, WindowPaintData &data) const
 {
     const QRectF natural = w->frameGeometry();
     if (natural.width() <= 0 || natural.height() <= 0) {
@@ -1304,7 +1310,8 @@ void ThumbnailBloomEffect::applyTransform(EffectWindow *w, const BloomState &sta
 
     // Scaling happens around the window's top left corner, so the translation is
     // expressed in unscaled screen coordinates.
-    data.setScale(QVector2D(state.current.width() / natural.width(), state.current.height() / natural.height()));
+    data.setScale(QVector2D(
+        state.current.width() / natural.width(), state.current.height() / natural.height()));
     data.setXTranslation(state.current.x() - natural.x());
     data.setYTranslation(state.current.y() - natural.y());
     data.multiplyOpacity(state.currentOpacity);
@@ -1389,7 +1396,8 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
                 m_liftAnchor = w;
             } else if (isRelevant(w)) {
                 const QRect frame = w->frameGeometry().toRect();
-                if (std::ranges::any_of(passed, [&](const QRect &r) { return frame.intersects(r); })) {
+                if (std::ranges::any_of(
+                        passed, [&](const QRect &r) { return frame.intersects(r); })) {
                     m_liftAnchor = w;
                 }
             }
@@ -1408,11 +1416,13 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     Effect::prePaintScreen(data);
 }
 
-void ThumbnailBloomEffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data)
+void ThumbnailBloomEffect::prePaintWindow(
+    RenderView *view, EffectWindow *w, WindowPrePaintData &data)
 {
     const auto it = m_states.find(w);
     if (it != m_states.end()
-        && (!sameRect(it->second.current, QRectF(w->frameGeometry())) || it->second.currentOpacity < 1.0)) {
+        && (!sameRect(it->second.current, QRectF(w->frameGeometry()))
+            || it->second.currentOpacity < 1.0)) {
         // The window is painted somewhere else and at another size, so it may
         // neither be clipped against nor culled by its real geometry.
         data.setTransformed();
@@ -1422,7 +1432,9 @@ void ThumbnailBloomEffect::prePaintWindow(RenderView *view, EffectWindow *w, Win
     Effect::prePaintWindow(view, w, data);
 }
 
-void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion, WindowPaintData &data)
+void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
+    const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion,
+    WindowPaintData &data)
 {
     // A click target is an internal window, and KWin puts every one of those in
     // the topmost layer, so painting it where it is in the stack would show its
@@ -1464,7 +1476,8 @@ bool ThumbnailBloomEffect::isLifted(EffectWindow *w) const
     return std::ranges::find(m_lifted, w) != m_lifted.end();
 }
 
-void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const RenderViewport &viewport)
+void ThumbnailBloomEffect::drawLifted(
+    const RenderTarget &renderTarget, const RenderViewport &viewport)
 {
     if (!m_liftPending) {
         return;
@@ -1488,7 +1501,7 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const Re
         WindowPaintData data;
         applyTransform(w, it->second, data);
         effects->drawWindow(renderTarget, viewport, w,
-                            PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
+            PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
 
         // The caption of a lifted thumbnail follows it here, so that it ends up
         // over the thumbnail rather than under it, like every other one does.
@@ -1498,7 +1511,8 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const Re
     }
 }
 
-void ThumbnailBloomEffect::drawCaption(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w)
+void ThumbnailBloomEffect::drawCaption(
+    const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w)
 {
     const auto it = m_states.find(w);
     if (it == m_states.end() || !it->second.overlay) {
@@ -1517,10 +1531,11 @@ void ThumbnailBloomEffect::drawCaption(const RenderTarget &renderTarget, const R
     // that window.
     WindowPaintData data;
     effects->drawWindow(renderTarget, viewport, overlay,
-                        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
+        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
 }
 
-void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, const BloomState &state) const
+void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
+    const RenderViewport &viewport, EffectWindow *w, const BloomState &state) const
 {
     const QRectF rect = state.current;
     if (!effects->isOpenGLCompositing() || rect.isEmpty()) {
@@ -1533,8 +1548,8 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const R
     // not after, which is what makes the border thinner where the thumbnail
     // recedes, as the frame of a turned surface has to be.
     const qreal width = std::min(outlineWidth, std::min(rect.width(), rect.height()) / 3.0);
-    const QTransform transform = bendTransform(rect, m_bendAngle * state.currentBend,
-                                               bendDirection(w, rect));
+    const QTransform transform
+        = bendTransform(rect, m_bendAngle * state.currentBend, bendDirection(w, rect));
 
     // The projection matrix of the viewport orthos over the render rect scaled by
     // the output scale, so the vertices are logical screen coordinates multiplied
@@ -1543,10 +1558,9 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const R
     // any other one they are not.
     const qreal scale = viewport.scale();
     const auto corners = [&](const QRectF &box) {
-        return std::array<QPointF, 4>{transform.map(box.topLeft()) * scale,
-                                      transform.map(box.topRight()) * scale,
-                                      transform.map(box.bottomRight()) * scale,
-                                      transform.map(box.bottomLeft()) * scale};
+        return std::array<QPointF, 4> { transform.map(box.topLeft()) * scale,
+            transform.map(box.topRight()) * scale, transform.map(box.bottomRight()) * scale,
+            transform.map(box.bottomLeft()) * scale };
     };
     const std::array<QPointF, 4> outer = corners(rect);
     const std::array<QPointF, 4> inner = corners(rect.adjusted(width, width, -width, -width));
@@ -1556,7 +1570,7 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const R
     vertices.reserve(24);
     for (size_t i = 0; i < outer.size(); ++i) {
         const size_t next = (i + 1) % outer.size();
-        appendQuad(vertices, {outer[i], outer[next], inner[next], inner[i]});
+        appendQuad(vertices, { outer[i], outer[next], inner[next], inner[i] });
     }
 
     GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
@@ -1565,9 +1579,11 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const R
 
     ShaderBinder binder(ShaderTrait::UniformColor | ShaderTrait::TransformColorspace);
     GLShader *shader = binder.shader();
-    shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, viewport.projectionMatrix());
+    shader->setUniform(
+        GLShader::Mat4Uniform::ModelViewProjectionMatrix, viewport.projectionMatrix());
     shader->setUniform(GLShader::ColorUniform::Color, outlineColor());
-    shader->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
+    shader->setColorspaceUniforms(
+        ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
 
     // The shader writes premultiplied alpha, and the state is left as it was
     // found: everything painted after this expects to set up its own blending.
@@ -1580,7 +1596,8 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const R
     }
 }
 
-void ThumbnailBloomEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
+void ThumbnailBloomEffect::paintScreen(const RenderTarget &renderTarget,
+    const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
     // Nothing is painted here; this only keeps hold of the damage of the pass for
     // the thumbnail that is stamped from inside the window pass, which is handed
@@ -1605,18 +1622,13 @@ void ThumbnailBloomEffect::postPaintScreen()
     Effect::postPaintScreen();
 }
 
-bool ThumbnailBloomEffect::isActive() const
-{
-    return !m_states.empty();
-}
+bool ThumbnailBloomEffect::isActive() const { return !m_states.empty(); }
 
-int ThumbnailBloomEffect::requestedEffectChainPosition() const
-{
-    return 50;
-}
+int ThumbnailBloomEffect::requestedEffectChainPosition() const { return 50; }
 
 } // namespace ThumbnailBloom
 
-KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(ThumbnailBloom::ThumbnailBloomEffect, "metadata.json", return true;, return false;)
+KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED(
+    ThumbnailBloom::ThumbnailBloomEffect, "metadata.json", return true;, return false;)
 
 #include "thumbnailbloom.moc"

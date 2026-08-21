@@ -10,8 +10,7 @@
 
 #include <KCModule>
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 /*! Settings page shown by System Settings for the Thumbnail Bloom effect. */
 class ThumbnailBloomEffectConfig : public KCModule

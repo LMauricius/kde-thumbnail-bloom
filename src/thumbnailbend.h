@@ -13,8 +13,7 @@
 
 #include <array>
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 /*!
  * The four corners of a bent thumbnail, clockwise from the top left.

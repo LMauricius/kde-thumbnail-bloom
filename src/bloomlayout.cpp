@@ -12,8 +12,7 @@
 #include <optional>
 #include <vector>
 
-namespace ThumbnailBloom
-{
+namespace ThumbnailBloom {
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -62,7 +61,8 @@ static int clamped(int value, int lower, int upper)
  * Places a \a size sized rectangle as close to \a desiredCenter as the free
  * space in \a free allows. Returns nothing when \a size fits nowhere.
  */
-static std::optional<QRect> nearestFreeSlot(const QRegion &free, const QSize &size, const QPointF &desiredCenter)
+static std::optional<QRect> nearestFreeSlot(
+    const QRegion &free, const QSize &size, const QPointF &desiredCenter)
 {
     std::optional<QRect> best;
     qreal bestDistance = 0;
@@ -75,10 +75,11 @@ static std::optional<QRect> nearestFreeSlot(const QRegion &free, const QSize &si
         }
 
         const QPoint desiredTopLeft(std::lround(desiredCenter.x() - size.width() / 2.0),
-                                    std::lround(desiredCenter.y() - size.height() / 2.0));
-        const QRect candidate(clamped(desiredTopLeft.x(), band.left(), band.right() + 1 - size.width()),
-                              clamped(desiredTopLeft.y(), band.top(), band.bottom() + 1 - size.height()),
-                              size.width(), size.height());
+            std::lround(desiredCenter.y() - size.height() / 2.0));
+        const QRect candidate(
+            clamped(desiredTopLeft.x(), band.left(), band.right() + 1 - size.width()),
+            clamped(desiredTopLeft.y(), band.top(), band.bottom() + 1 - size.height()),
+            size.width(), size.height());
 
         // Bands are only single rows of the region, so a candidate that sticks
         // out vertically into a neighbouring band still has to be checked.
@@ -109,7 +110,8 @@ static std::optional<QRect> nearestFreeSlot(const QRegion &free, const QSize &si
  * measure the same LayoutOptions::minOccludedFraction of the window's own area,
  * so a window merely grazing another is left alone either way.
  */
-static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const LayoutOptions &options)
+static std::vector<bool> selectBloomed(
+    const QList<LayoutWindow> &stack, const LayoutOptions &options)
 {
     std::vector<bool> bloomed(stack.size(), false);
 
@@ -126,7 +128,8 @@ static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const L
     }
     for (int i = 0; i < stack.size(); ++i) {
         if (stack[i].eligible && !stack[i].reserved
-            && coversEnough(reserved, stack[i].geometry.toAlignedRect(), options.minOccludedFraction)) {
+            && coversEnough(
+                reserved, stack[i].geometry.toAlignedRect(), options.minOccludedFraction)) {
             bloomed[i] = true;
         }
     }
@@ -165,7 +168,8 @@ static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const L
 // Layout pass
 // ---------------------------------------------------------------------------
 
-QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
+QList<Placement> computeLayout(
+    const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
 {
     const QRect area = workArea.toAlignedRect();
     const std::vector<bool> bloomed = selectBloomed(stack, options);
@@ -197,9 +201,10 @@ QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &w
         const QPointF desiredCenter = window.geometry.center();
         std::optional<QRect> slot;
 
-        for (qreal scale = options.initialScale; scale >= options.minScale - 0.001; scale -= options.scaleStep) {
+        for (qreal scale = options.initialScale; scale >= options.minScale - 0.001;
+            scale -= options.scaleStep) {
             const QSize size(std::max(1, int(std::lround(window.geometry.width() * scale))),
-                             std::max(1, int(std::lround(window.geometry.height() * scale))));
+                std::max(1, int(std::lround(window.geometry.height() * scale))));
             slot = nearestFreeSlot(free, size, desiredCenter);
             if (slot) {
                 break;
@@ -214,7 +219,7 @@ QList<Placement> computeLayout(const QList<LayoutWindow> &stack, const QRectF &w
             continue;
         }
 
-            placements.append(Placement{window.id, QRectF(*slot)});
+        placements.append(Placement { window.id, QRectF(*slot) });
         blocked += grown(*slot, options.margin);
     }
 
