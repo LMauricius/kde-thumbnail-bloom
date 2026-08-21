@@ -201,6 +201,8 @@ private:
 
     /*! Whether \a w takes part in the layout at all (as thumbnail or as obstacle). */
     bool isRelevant(KWin::EffectWindow *w) const;
+    /*! Whether the settings exempt \a w from the effect, so that it neither blooms nor makes others bloom. */
+    bool isIgnored(KWin::EffectWindow *w, const QSet<KWin::EffectWindow *> &parents) const;
     /*! Whether \a w may be turned into a thumbnail, honouring the settings. */
     bool isEligible(KWin::EffectWindow *w, const QSet<KWin::EffectWindow *> &parents) const;
     /*! Whether \a w covers its whole maximize area (fullscreen counts as maximized). */

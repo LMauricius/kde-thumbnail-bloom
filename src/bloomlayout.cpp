@@ -105,9 +105,9 @@ static std::optional<QRect> nearestFreeSlot(const QRegion &free, const QSize &si
  *
  * Two rules, in order: enough of the window lies over a reserved window, so
  * that it is in the way of the window being worked in; or enough of it is
- * hidden by the windows that stay put. Both measure the same
- * LayoutOptions::minOccludedFraction of the window's own area, so a window
- * merely grazing another is left alone either way.
+ * hidden by the windows that stay put and are not ignored outright. Both
+ * measure the same LayoutOptions::minOccludedFraction of the window's own area,
+ * so a window merely grazing another is left alone either way.
  */
 static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const LayoutOptions &options)
 {
@@ -115,9 +115,12 @@ static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const L
 
     // Rule one: sharing space with a reserved window, whatever the stacking
     // says. A window above the active one hides just as much of it as one below.
+    // An ignored window claims nothing even while it is the active one: the
+    // settings keep it out of the effect, and clearing space around it is part
+    // of the effect.
     QRegion reserved;
     for (const LayoutWindow &window : stack) {
-        if (window.reserved) {
+        if (window.reserved && !window.ignored) {
             reserved += window.geometry.toAlignedRect();
         }
     }
@@ -134,6 +137,12 @@ static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const L
     // that is what stops one thumbnail from dragging the whole stack under it
     // along with it. A window only a sliver of which is covered is still usable
     // where it is, hence the threshold rather than a plain intersection test.
+    //
+    // Ignored windows are left out of the region as well: the settings keep them
+    // out of the effect altogether, so one must not push the windows under it
+    // aside either. That is narrower than plain ineligibility, since the window
+    // being moved or resized is no candidate for a thumbnail yet still hides
+    // whatever it is dragged over.
     QRegion cover;
     for (int i = stack.size() - 1; i >= 0; --i) {
         if (bloomed[i]) {
@@ -144,7 +153,9 @@ static std::vector<bool> selectBloomed(const QList<LayoutWindow> &stack, const L
             bloomed[i] = true;
             continue;
         }
-        cover += geometry;
+        if (!stack[i].ignored) {
+            cover += geometry;
+        }
     }
 
     return bloomed;

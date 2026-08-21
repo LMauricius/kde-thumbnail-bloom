@@ -22,6 +22,7 @@ struct LayoutWindow
     QRectF geometry; //!< where the window currently is on screen
     bool eligible = false; //!< whether this window may be turned into a thumbnail
     bool reserved = false; //!< whether no thumbnail may ever be placed over this window
+    bool ignored = false; //!< whether the settings exempt this window from the effect entirely; overrides both flags above
 };
 
 /*!
@@ -56,7 +57,9 @@ struct Placement
  * into a thumbnail when LayoutOptions::minOccludedFraction of its area lies
  * over a LayoutWindow::reserved window (wherever the two sit in the stack), or
  * is hidden by the windows above it that are staying put. Windows that are themselves becoming thumbnails cover
- * nothing, so one thumbnail does not pull the windows under it along.
+ * nothing, so one thumbnail does not pull the windows under it along; neither do
+ * the LayoutWindow::ignored ones, which the settings keep out of the effect
+ * altogether rather than letting them push others aside.
  *
  * The thumbnail is then shrunk to LayoutOptions::initialScale and put in the
  * free space nearest to where the window sits; if nothing fits, it keeps

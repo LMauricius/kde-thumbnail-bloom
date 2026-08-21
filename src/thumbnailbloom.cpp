@@ -493,8 +493,11 @@ void ThumbnailBloomEffect::relayout()
         if (!isRelevant(w)) {
             continue;
         }
-        perScreen[w->screen()].append(
-            LayoutWindow{w, QRectF(w->frameGeometry()), isEligible(w, parents), w == effects->activeWindow()});
+        perScreen[w->screen()].append(LayoutWindow{w,
+                                                   QRectF(w->frameGeometry()),
+                                                   isEligible(w, parents),
+                                                   w == effects->activeWindow(),
+                                                   isIgnored(w, parents)});
     }
 
     QSet<EffectWindow *> bloomed;
@@ -991,25 +994,33 @@ void ThumbnailBloomEffect::updateSystemRegion()
     }
 }
 
+bool ThumbnailBloomEffect::isIgnored(EffectWindow *w, const QSet<EffectWindow *> &parents) const
+{
+    if (m_skipKeepAbove && w->keepAbove()) {
+        return true;
+    }
+    if (m_skipMaximized && isMaximized(w)) {
+        return true;
+    }
+    if (m_skipChildren && w->transientFor()) {
+        return true;
+    }
+    if (m_skipParents && parents.contains(w)) {
+        return true;
+    }
+
+    return false;
+}
+
 bool ThumbnailBloomEffect::isEligible(EffectWindow *w, const QSet<EffectWindow *> &parents) const
 {
+    // The window being worked in, or the one under the pointer's grab, is no
+    // candidate either, but unlike an ignored one it still hides what it covers.
     if (w == effects->activeWindow() || w->isUserMove() || w->isUserResize()) {
         return false;
     }
-    if (m_skipKeepAbove && w->keepAbove()) {
-        return false;
-    }
-    if (m_skipMaximized && isMaximized(w)) {
-        return false;
-    }
-    if (m_skipChildren && w->transientFor()) {
-        return false;
-    }
-    if (m_skipParents && parents.contains(w)) {
-        return false;
-    }
 
-    return true;
+    return !isIgnored(w, parents);
 }
 
 bool ThumbnailBloomEffect::isMaximized(EffectWindow *w) const
