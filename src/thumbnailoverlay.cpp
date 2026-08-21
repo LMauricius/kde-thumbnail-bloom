@@ -399,6 +399,12 @@ bool ThumbnailOverlay::isDrag(const QPointF &origin, const QPointF &pos)
     return (pos - origin).manhattanLength() >= QGuiApplication::styleHints()->startDragDistance();
 }
 
+void ThumbnailOverlay::resetTouch()
+{
+    m_touchArmed = false;
+    m_longPressTimer.stop();
+}
+
 bool ThumbnailOverlay::event(QEvent *event)
 {
     // Only the first point of a sequence is followed; the others belong to
@@ -412,10 +418,9 @@ bool ThumbnailOverlay::event(QEvent *event)
             m_touchArmed = true;
             m_longPressTimer.start();
         }
-        event->accept();
-        return true;
+        break;
     }
-    case QEvent::TouchUpdate: {
+    case QEvent::TouchUpdate:
         for (const QEventPoint &point : static_cast<QTouchEvent *>(event)->points()) {
             if (!m_touchArmed || point.id() != m_touchId
                 || !isDrag(m_touchOrigin, point.globalPosition())) {
@@ -424,34 +429,28 @@ bool ThumbnailOverlay::event(QEvent *event)
             // A finger that moved is neither a tap nor a hold any more. From
             // here on the sequence is driven by the effect's own touch filter,
             // because KWin's move filter only follows a point it saw go down.
-            m_touchArmed = false;
-            m_longPressTimer.stop();
-            event->accept();
+            resetTouch();
             Q_EMIT dragStarted(point.globalPosition(), m_touchId);
-            return true;
+            break;
         }
-        event->accept();
-        return true;
-    }
-    case QEvent::TouchEnd: {
+        break;
+    case QEvent::TouchEnd:
         if (m_touchArmed) {
-            m_touchArmed = false;
-            m_longPressTimer.stop();
-            event->accept();
+            resetTouch();
             Q_EMIT activated();
-            return true;
         }
-        event->accept();
-        return true;
-    }
+        break;
     case QEvent::TouchCancel:
-        m_touchArmed = false;
-        m_longPressTimer.stop();
-        event->accept();
-        return true;
+        resetTouch();
+        break;
     default:
         return OverlayWindow::event(event);
     }
+
+    // The whole sequence is accepted whatever came of it, so Qt neither hands
+    // it on nor synthesises a mouse event out of it for the window below.
+    event->accept();
+    return true;
 }
 
 // Every button is still swallowed, they just do not all mean something.

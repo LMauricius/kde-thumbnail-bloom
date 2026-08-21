@@ -117,6 +117,8 @@ protected:
 private:
     /*! Whether \a pos is far enough from \a origin to count as a drag. */
     static bool isDrag(const QPointF &origin, const QPointF &pos);
+    /*! Ends the tracked touch sequence: no tap or long press can come of it any more. */
+    void resetTouch();
 
     QIcon m_icon;
     QString m_title;
