@@ -17,6 +17,7 @@
 #include <QRegion>
 #include <QRectF>
 #include <QTimer>
+#include <QTransform>
 
 #include <memory>
 #include <vector>
@@ -261,6 +262,15 @@ private:
         KWin::WindowQuadList &quads) override;
     /*! Redirects \a w into an offscreen texture, or stops doing so, as \a redirected asks. */
     void setRedirected(KWin::EffectWindow *w, BloomState &state, bool redirected);
+    /*!
+     * The bend of \a state applied over \a rect: the configured angle scaled by
+     * the animated strength, leaning towards the window's real place. \a rect is
+     * the frame at the origin for the pixels (apply()) and the on-screen
+     * rectangle for the outline (drawOutline()); the direction is taken from the
+     * on-screen rectangle either way, so the two cannot drift apart.
+     */
+    QTransform stateBend(
+        KWin::EffectWindow *w, const BloomState &state, const QRectF &rect) const;
     /*! Applies the thumbnail transformation of \a state to \a data. */
     void applyTransform(
         KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;

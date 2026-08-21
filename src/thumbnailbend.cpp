@@ -27,9 +27,15 @@ constexpr qreal viewDistance = 2.0;
 /*! Returns the dot product of \a a and \a b. */
 static qreal dot(const QPointF &a, const QPointF &b) { return a.x() * b.x() + a.y() * b.y(); }
 
+/*! Returns the corners of \a rect in quad order: clockwise from the top left. */
+static BendQuad cornersOf(const QRectF &rect)
+{
+    return { rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft() };
+}
+
 BendQuad bendQuad(const QRectF &rect, qreal angle, const QVector2D &direction)
 {
-    const BendQuad flat { rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft() };
+    const BendQuad flat = cornersOf(rect);
 
     const qreal length = std::hypot(direction.x(), direction.y());
     if (rect.isEmpty() || qFuzzyIsNull(angle) || qFuzzyIsNull(length)) {
@@ -94,8 +100,8 @@ QTransform bendTransform(const QRectF &rect, qreal angle, const QVector2D &direc
     }
 
     const BendQuad bent = bendQuad(rect, angle, direction);
-    const QPolygonF flat(
-        { rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft() });
+    const BendQuad corners = cornersOf(rect);
+    const QPolygonF flat({ corners[0], corners[1], corners[2], corners[3] });
 
     QTransform transform;
     if (!QTransform::quadToQuad(

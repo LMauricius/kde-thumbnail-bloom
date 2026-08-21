@@ -62,6 +62,12 @@ constexpr bool reducedMotion = true;
  */
 constexpr int bendSubdivisions = 16;
 
+/*! The frame geometry of \a w as a QRectF, the rectangle all the geometry here runs on. */
+static QRectF frameRect(const EffectWindow *w)
+{
+    return QRectF(w->frameGeometry());
+}
+
 /*!
  * Returns the side the thumbnail of \a w resting at \a rect turns away towards.
  *
@@ -72,7 +78,7 @@ constexpr int bendSubdivisions = 16;
  */
 static QVector2D bendDirection(EffectWindow *w, const QRectF &rect)
 {
-    const QPointF offset = QRectF(w->frameGeometry()).center() - rect.center();
+    const QPointF offset = frameRect(w).center() - rect.center();
     QVector2D direction(offset.x(), offset.y());
     direction.normalize();
     return direction;
@@ -155,6 +161,9 @@ static QRectF thumbnailBounds(EffectWindow *w, const QRectF &rect)
 //! Width of the hover outline, in logical pixels.
 constexpr qreal outlineWidth = 2.0;
 
+//! How far past its resting growth of 1 a thumbnail must be drawn to count as lifted.
+constexpr qreal liftEpsilon = 1e-3;
+
 /*!
  * Returns the two triangles covering the quad \a corners, appended to \a vertices.
  *
@@ -162,7 +171,7 @@ constexpr qreal outlineWidth = 2.0;
  * in, and nothing here assumes the shape is a rectangle: a bent outline is four
  * trapezoids.
  */
-static void appendQuad(std::vector<QVector2D> &vertices, const std::array<QPointF, 4> &corners)
+static void appendQuad(std::vector<QVector2D> &vertices, const BendQuad &corners)
 {
     const QVector2D topLeft(corners[0]);
     const QVector2D topRight(corners[1]);
@@ -255,10 +264,6 @@ static bool layoutFrozen() { return reducedMotion && userMoveInProgress(); }
  * it never showed them.) The three skip flags are what those lists honour, and
  * the close animation flag keeps the other effects from playing anything when a
  * target is dropped.
- *
- * Has to run after every show(): hiding an internal window destroys the
- * KWin::Window behind it, so showing it again makes a fresh one with the
- * defaults back.
  */
 static void hideFromWindowLists(QWindow *handle)
 {
@@ -271,6 +276,17 @@ static void hideFromWindowLists(QWindow *handle)
     window->setSkipPager(true);
     window->setSkipSwitcher(true);
     window->setSkipCloseAnimation(true);
+}
+
+/*!
+ * Shows \a window and takes it back out of the window lists. The two go
+ * together: hiding an internal window destroys the KWin::Window behind it, so
+ * every show() makes a fresh one with the default flags back.
+ */
+static void showOverlay(QRasterWindow *window)
+{
+    window->show();
+    hideFromWindowLists(window);
 }
 
 /*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
@@ -651,7 +667,7 @@ void ThumbnailBloomEffect::relayout()
     // schedules the pass that catches the layout up.
     if (layoutFrozen()) {
         for (auto &[w, state] : m_states) {
-            retarget(w, w->isUserMove() ? QRectF(w->frameGeometry()) : QRectF(state.base));
+            retarget(w, w->isUserMove() ? frameRect(w) : QRectF(state.base));
         }
         updateShields();
         updateHover(effects->cursorPos());
@@ -680,7 +696,7 @@ void ThumbnailBloomEffect::relayout()
         if (!isRelevant(w)) {
             continue;
         }
-        perScreen[w->screen()].append(LayoutWindow { w, QRectF(w->frameGeometry()),
+        perScreen[w->screen()].append(LayoutWindow { w, frameRect(w),
             isEligible(w, parents), w == effects->activeWindow(), isIgnored(w, parents) });
     }
 
@@ -698,7 +714,7 @@ void ThumbnailBloomEffect::relayout()
     for (auto &[w, state] : m_states) {
         if (!bloomed.contains(w)) {
             state.hovered = false;
-            retarget(w, QRectF(w->frameGeometry()));
+            retarget(w, frameRect(w));
         }
     }
 
@@ -721,9 +737,9 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // A window travelling back to its real geometry is on its way to being an
     // ordinary window again, so it fades back to fully opaque just like the
     // hovered thumbnail does.
-    const bool thumbnail = !sameRect(base, QRectF(w->frameGeometry()));
+    const bool thumbnail = !sameRect(base, frameRect(w));
     const QRectF target = state.hovered
-        ? grownRect(base, QRectF(w->frameGeometry()), QRectF(effects->clientArea(MaximizeArea, w)))
+        ? grownRect(base, frameRect(w), QRectF(effects->clientArea(MaximizeArea, w)))
         : base;
     const qreal targetOpacity = (thumbnail && !state.hovered) ? m_thumbnailOpacity : 1.0;
     // The caption belongs to the resting thumbnail only: it fades out under the
@@ -746,7 +762,7 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     updateOverlay(w, state);
 
     if (inserted) {
-        state.rect.snap(QRectF(w->frameGeometry()));
+        state.rect.snap(frameRect(w));
         state.opacity.snap(1.0);
         state.caption.snap(0.0);
         state.bend.snap(0.0);
@@ -939,7 +955,7 @@ void ThumbnailBloomEffect::startThumbnailMove(EffectWindow *w, const QPointF &po
     // The window is dragged out of its thumbnail, so that is where it starts:
     // its own size, centred on the rectangle the pointer or the finger is
     // actually on, kept inside the work area.
-    QRectF target(QPointF(), QRectF(w->frameGeometry()).size());
+    QRectF target(QPointF(), frameRect(w).size());
     target.moveCenter(it->second.rect.current.center());
     target = window->keepInArea(target, effects->clientArea(MaximizeArea, w));
 
@@ -980,7 +996,7 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     const QRect rect = state.base.toAlignedRect();
     state.hitRegion = QRegion(rect) - m_systemRegion;
 
-    const bool goingHome = sameRect(state.base, QRectF(w->frameGeometry()));
+    const bool goingHome = sameRect(state.base, frameRect(w));
     if (goingHome || state.hitRegion.isEmpty()) {
         state.hitRegion = QRegion();
         if (state.overlay) {
@@ -1022,8 +1038,7 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     // travel with the animation, and never grows with the hover either.
     state.overlay->setGeometry(rect);
     state.overlay->setMask(state.hitRegion.translated(-rect.topLeft()));
-    state.overlay->show();
-    hideFromWindowLists(state.overlay.get());
+    showOverlay(state.overlay.get());
 }
 
 void ThumbnailBloomEffect::updateShields()
@@ -1090,8 +1105,7 @@ void ThumbnailBloomEffect::updateShields()
                 const QRect bounds = exposed.boundingRect();
                 state.shield->setGeometry(bounds);
                 state.shield->setMask(exposed.translated(-bounds.topLeft()));
-                state.shield->show();
-                hideFromWindowLists(state.shield.get());
+                showOverlay(state.shield.get());
                 shielded.insert(w);
                 shieldRegion += exposed;
             }
@@ -1241,6 +1255,13 @@ void ThumbnailBloomEffect::setRedirected(EffectWindow *w, BloomState &state, boo
     }
 }
 
+QTransform ThumbnailBloomEffect::stateBend(
+    EffectWindow *w, const BloomState &state, const QRectF &rect) const
+{
+    return bendTransform(rect, m_bendAngle * state.bend.current,
+        bendDirection(w, state.rect.current));
+}
+
 void ThumbnailBloomEffect::apply(
     EffectWindow *window, int /*mask*/, WindowPaintData & /*data*/, WindowQuadList &quads)
 {
@@ -1256,13 +1277,12 @@ void ThumbnailBloomEffect::apply(
     // negative coordinates above and to the left. The bend is worked out on the
     // frame alone and the scale and the translation that put the thumbnail on the
     // screen are applied to the result afterwards, by applyTransform().
-    const QRectF frame(QPointF(0, 0), QRectF(window->frameGeometry()).size());
+    const QRectF frame(QPointF(0, 0), frameRect(window).size());
     if (frame.isEmpty()) {
         return;
     }
 
-    const QTransform transform = bendTransform(frame, m_bendAngle * bloomState.bend.current,
-        bendDirection(window, bloomState.rect.current));
+    const QTransform transform = stateBend(window, bloomState, frame);
 
     // The transform is projective, so mapping a vertex through it is the whole
     // perspective: what the subdivision adds is that every cell of the grid gets
@@ -1321,7 +1341,7 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 
         // A thumbnail that has arrived back at its window is not a thumbnail
         // any more. Click targets are placed by the relayout, not from here.
-        if (sameRect(state.rect.to, QRectF(w->frameGeometry()))) {
+        if (sameRect(state.rect.to, frameRect(w))) {
             settledBack.push_back(w);
         }
     }
@@ -1338,7 +1358,7 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     // still on their way up cover the ones already on their way down.
     m_lifted.clear();
     for (const auto &[w, state] : m_states) {
-        if (state.hovered || growth(state.rect.current, state.base) > 1.0 + 1e-3) {
+        if (state.hovered || growth(state.rect.current, state.base) > 1.0 + liftEpsilon) {
             m_lifted.push_back(w);
         }
     }
@@ -1402,7 +1422,7 @@ void ThumbnailBloomEffect::prePaintWindow(
 {
     const auto it = m_states.find(w);
     if (it != m_states.end()
-        && (!sameRect(it->second.rect.current, QRectF(w->frameGeometry()))
+        && (!sameRect(it->second.rect.current, frameRect(w))
             || it->second.opacity.current < 1.0)) {
         // The window is painted somewhere else and at another size, so it may
         // neither be clipped against nor culled by its real geometry.
@@ -1529,8 +1549,7 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
     // not after, which is what makes the border thinner where the thumbnail
     // recedes, as the frame of a turned surface has to be.
     const qreal width = std::min(outlineWidth, std::min(rect.width(), rect.height()) / 3.0);
-    const QTransform transform
-        = bendTransform(rect, m_bendAngle * state.bend.current, bendDirection(w, rect));
+    const QTransform transform = stateBend(w, state, rect);
 
     // The projection matrix of the viewport orthos over the render rect scaled by
     // the output scale, so the vertices are logical screen coordinates multiplied
@@ -1539,12 +1558,12 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
     // any other one they are not.
     const qreal scale = viewport.scale();
     const auto corners = [&](const QRectF &box) {
-        return std::array<QPointF, 4> { transform.map(box.topLeft()) * scale,
+        return BendQuad { transform.map(box.topLeft()) * scale,
             transform.map(box.topRight()) * scale, transform.map(box.bottomRight()) * scale,
             transform.map(box.bottomLeft()) * scale };
     };
-    const std::array<QPointF, 4> outer = corners(rect);
-    const std::array<QPointF, 4> inner = corners(rect.adjusted(width, width, -width, -width));
+    const BendQuad outer = corners(rect);
+    const BendQuad inner = corners(rect.adjusted(width, width, -width, -width));
 
     // One trapezoid per edge, between the outer corners and the inner ones.
     std::vector<QVector2D> vertices;
