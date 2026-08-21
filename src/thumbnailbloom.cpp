@@ -226,13 +226,15 @@ static bool isInputTarget(EffectWindow *w)
     return w->isOnCurrentDesktop() && w->isOnCurrentActivity();
 }
 
-/*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
 /*! Whether the user is dragging a window around right now. */
 static bool userMoveInProgress()
 {
     const Window *window = workspace()->moveResizeWindow();
     return window && window->isInteractiveMove();
 }
+
+/*! Whether the layout holds still right now: reduced motion during a drag. */
+static bool layoutFrozen() { return reducedMotion && userMoveInProgress(); }
 
 /*!
  * Keeps the internal window behind \a handle out of every list of windows the
@@ -263,6 +265,7 @@ static void hideFromWindowLists(QWindow *handle)
     window->setSkipCloseAnimation(true);
 }
 
+/*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
 static bool sameRect(const QRectF &a, const QRectF &b)
 {
     constexpr qreal epsilon = 0.01;
@@ -495,7 +498,6 @@ bool TouchDragFilter::touchCancel()
 // ---------------------------------------------------------------------------
 
 ThumbnailBloomEffect::ThumbnailBloomEffect()
-    : m_animationDuration(250)
 {
     input()->installInputEventFilter(&m_shieldFilter);
     input()->installInputEventFilter(&m_touchDragFilter);
@@ -660,7 +662,7 @@ void ThumbnailBloomEffect::relayout()
     // is retargeted is the dragged one itself, which is on its way back to its
     // real geometry and has to keep following the pointer. The finish signal
     // schedules the pass that catches the layout up.
-    if (reducedMotion && userMoveInProgress()) {
+    if (layoutFrozen()) {
         for (auto &[w, state] : m_states) {
             retarget(w, w->isUserMove() ? QRectF(w->frameGeometry()) : QRectF(state.base));
         }
@@ -840,7 +842,7 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // passing over it on its way somewhere else. Nothing is hovered until the
     // drag ends, and the pass the finish signal schedules picks the hover back
     // up from wherever the pointer came to rest.
-    if (reducedMotion && userMoveInProgress()) {
+    if (layoutFrozen()) {
         for (const auto &[w, state] : m_states) {
             setHovered(w, false);
         }
@@ -1258,11 +1260,8 @@ void ThumbnailBloomEffect::setRedirected(EffectWindow *w, BloomState &state, boo
 }
 
 void ThumbnailBloomEffect::apply(
-    EffectWindow *window, int mask, WindowPaintData &data, WindowQuadList &quads)
+    EffectWindow *window, int /*mask*/, WindowPaintData & /*data*/, WindowQuadList &quads)
 {
-    Q_UNUSED(mask)
-    Q_UNUSED(data)
-
     const auto it = m_states.find(window);
     if (it == m_states.end() || it->second.currentBend <= 0.0) {
         return;

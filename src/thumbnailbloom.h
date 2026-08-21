@@ -295,12 +295,12 @@ private:
 
     std::unordered_map<KWin::EffectWindow *, BloomState> m_states;
     QTimer m_relayoutTimer;
-    std::chrono::milliseconds m_animationDuration;
+    std::chrono::milliseconds m_animationDuration { 250 };
     bool m_showIcons = true;
     bool m_showTitles = true;
-    qreal m_thumbnailOpacity = 0.7; //!< opacity of a thumbnail that is not hovered
+    qreal m_thumbnailOpacity = 0.9; //!< opacity of a thumbnail that is not hovered
     qreal m_bendAngle
-        = 45.0; //!< angle a resting thumbnail is turned by, in degrees; 0 keeps them flat
+        = 15.0; //!< angle a resting thumbnail is turned by, in degrees; 0 keeps them flat
     LayoutOptions m_layoutOptions;
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
     ShieldFilter m_shieldFilter;
