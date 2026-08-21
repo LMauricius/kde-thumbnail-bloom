@@ -229,6 +229,35 @@ static bool userMoveInProgress() {
   return window && window->isInteractiveMove();
 }
 
+/*!
+ * Keeps the internal window behind \a handle out of every list of windows the
+ * user can see.
+ *
+ * KWin hands an internal window to the rest of the session as an ordinary one,
+ * so the effect's shields and click targets turn up in anything that walks the
+ * window list and does not ask whether a window is a real client: the Overview
+ * and Window View heaps, task managers, pagers. (The task switcher does ask, so
+ * it never showed them.) The three skip flags are what those lists honour, and
+ * the close animation flag keeps the other effects from playing anything when a
+ * target is dropped.
+ *
+ * Has to run after every show(): hiding an internal window destroys the
+ * KWin::Window behind it, so showing it again makes a fresh one with the
+ * defaults back.
+ */
+static void hideFromWindowLists(QWindow *handle)
+{
+    Window *window = workspace()->findInternal(handle);
+    if (!window) {
+        return;
+    }
+
+    window->setSkipTaskbar(true);
+    window->setSkipPager(true);
+    window->setSkipSwitcher(true);
+    window->setSkipCloseAnimation(true);
+}
+
 static bool sameRect(const QRectF &a, const QRectF &b)
 {
     constexpr qreal epsilon = 0.01;
@@ -1006,6 +1035,7 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     state.overlay->setGeometry(rect);
     state.overlay->setMask(state.hitRegion.translated(-rect.topLeft()));
     state.overlay->show();
+    hideFromWindowLists(state.overlay.get());
 }
 
 void ThumbnailBloomEffect::updateShields()
@@ -1073,6 +1103,7 @@ void ThumbnailBloomEffect::updateShields()
                 state.shield->setGeometry(bounds);
                 state.shield->setMask(exposed.translated(-bounds.topLeft()));
                 state.shield->show();
+                hideFromWindowLists(state.shield.get());
                 shielded.insert(w);
                 shieldRegion += exposed;
             }
