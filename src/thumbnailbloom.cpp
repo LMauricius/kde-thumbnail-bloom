@@ -516,7 +516,6 @@ void ThumbnailBloomEffect::relayout()
                                     : QRectF(state.base));
       }
       updateShields();
-      raiseLiftedOverlay();
       updateHover(effects->cursorPos());
       return;
     }
@@ -571,10 +570,6 @@ void ThumbnailBloomEffect::relayout()
     // Needs the final click targets of every thumbnail, so it comes after the
     // whole layout rather than per window.
     updateShields();
-
-    // Painting the lifted thumbnail over the other captions only leaves its own
-    // caption above it if its click target is the last one painted.
-    raiseLiftedOverlay();
 
     // The click targets have just been placed and moved, so the pointer can end
     // up on another thumbnail without having moved at all.
@@ -983,44 +978,6 @@ bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
     return w->isNormalWindow() || w->isDialog();
 }
 
-void ThumbnailBloomEffect::raiseLiftedOverlay()
-{
-    // Only ever reached from the relayout pass: restacking a window is no safer
-    // under input dispatch or the effect chain than hiding one.
-    if (!m_liftedWindow) {
-        return;
-    }
-    const auto it = m_states.find(m_liftedWindow);
-    if (it == m_states.end() || !it->second.overlay) {
-        return;
-    }
-    EffectWindow *overlay = effects->findWindow(it->second.overlay.get());
-    if (!overlay) {
-        return;
-    }
-
-    // Raised only when another click target is actually above it: the raise
-    // changes the stacking order, which schedules the next relayout, so an
-    // unconditional one would never stop.
-    bool above = false;
-    bool covered = false;
-    for (EffectWindow *w : effects->stackingOrder()) {
-        if (w == overlay) {
-            above = true;
-        } else if (above && isCaptionTarget(w)) {
-            covered = true;
-            break;
-        }
-    }
-    if (!covered) {
-        return;
-    }
-
-    if (Window *window = overlay->window()) {
-        Workspace::self()->raiseWindow(window);
-    }
-}
-
 bool ThumbnailBloomEffect::isCaptionTarget(EffectWindow *w) const
 {
     const QWindow *handle = w->internalWindow();
@@ -1175,19 +1132,13 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         const BloomState &lifted = m_states.at(m_liftedWindow);
         const QRectF thumbnail = lifted.current;
 
-        // Its own click target is the exception: it carries the caption of the
-        // lifted thumbnail, which fades out rather than being covered, and
-        // raiseLiftedOverlay() has put it above every other one so that it is
-        // still painted after the thumbnail has been stamped.
-        const EffectWindow *own = lifted.overlay ? effects->findWindow(lifted.overlay.get()) : nullptr;
-
         bool above = false;
         for (EffectWindow *w : effects->stackingOrder()) {
             if (w == m_liftedWindow) {
                 // The stacking order runs bottom to top, so only what follows
                 // covers the thumbnail; anything below it is already covered.
                 above = true;
-            } else if (above && (isRelevant(w) || (isCaptionTarget(w) && w != own))
+            } else if (above && isRelevant(w)
                        && w->frameGeometry().toRect().intersects(Rect(thumbnail.toAlignedRect()))) {
                 m_liftAnchor = w;
             }
@@ -1222,6 +1173,16 @@ void ThumbnailBloomEffect::prePaintWindow(RenderView *view, EffectWindow *w, Win
 
 void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion, WindowPaintData &data)
 {
+    // A click target is an internal window, and KWin puts every one of those in
+    // the topmost layer, so painting it where it is in the stack would show its
+    // caption over whatever covers the thumbnail. It is left out here and drawn
+    // again right after the window it belongs to, which is what gives the
+    // caption the depth of its own thumbnail: from there the compositor covers
+    // the two together, and nothing has to be worked out from geometry.
+    if (isCaptionTarget(w)) {
+        return;
+    }
+
     // The lifted thumbnail is left out at its own place in the stacking order and
     // drawn again after the anchor: not chaining the call is what keeps a window
     // out of a pass. Without an anchor it is already the topmost window and can
@@ -1236,6 +1197,8 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget, const R
     }
 
     Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
+
+    drawCaption(renderTarget, viewport, w);
 
     if (w == m_liftAnchor) {
         drawLifted(renderTarget, viewport);
@@ -1269,7 +1232,33 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const Re
     effects->drawWindow(renderTarget, viewport, m_liftedWindow,
                         PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
 
+    // The caption of the lifted thumbnail follows it here, so that it ends up
+    // over the thumbnail rather than under it, like every other one does.
+    drawCaption(renderTarget, viewport, m_liftedWindow);
+
     drawOutline(renderTarget, viewport, it->second.current);
+}
+
+void ThumbnailBloomEffect::drawCaption(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w)
+{
+    const auto it = m_states.find(w);
+    if (it == m_states.end() || !it->second.overlay) {
+        return;
+    }
+
+    EffectWindow *overlay = effects->findWindow(it->second.overlay.get());
+    if (!overlay || !overlay->isVisible()) {
+        return;
+    }
+
+    // Drawn untransformed and where it is: the click target already sits on the
+    // resting rectangle of the thumbnail, so all this changes is the moment of
+    // the draw. The region is the damage of the whole pass, for the same reason
+    // as in drawLifted(): the region of the window just painted is clipped to
+    // that window.
+    WindowPaintData data;
+    effects->drawWindow(renderTarget, viewport, overlay,
+                        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
 }
 
 void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const RenderViewport &viewport, const QRectF &rect) const

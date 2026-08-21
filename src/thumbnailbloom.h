@@ -192,8 +192,14 @@ private:
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, const QRectF &rect) const;
     /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
-    /*! Puts the click target of the lifted thumbnail above every other one, so its caption stays visible. */
-    void raiseLiftedOverlay();
+    /*!
+     * Draws the caption of \a w, which is to say its click target, if it has one.
+     *
+     * Called right after the thumbnail of \a w has been drawn, which is what
+     * puts the caption at the depth of the thumbnail rather than at the top of
+     * the screen, where the layer of an internal window would otherwise keep it.
+     */
+    void drawCaption(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, KWin::EffectWindow *w);
     /*! Puts a shield on the part of every bloomed window that would still take input. */
     void updateShields();
 
