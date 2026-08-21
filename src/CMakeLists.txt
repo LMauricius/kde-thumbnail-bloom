@@ -2,6 +2,7 @@
 kcoreaddons_add_plugin(thumbnailbloom
     SOURCES
         bloomlayout.cpp
+        inputfilters.cpp
         thumbnailbend.cpp
         thumbnailbloom.cpp
         thumbnailoverlay.cpp
