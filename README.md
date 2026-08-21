@@ -32,14 +32,14 @@ flowchart TD
 
 ## Using a thumbnail
 
-| Gesture                    | Result                                                              |
-| -------------------------- | ------------------------------------------------------------------- |
-| Left click (on release)    | Activates the window and brings it to the front.                    |
-| Left drag                  | Activates the window and moves it, starting from the thumbnail.     |
-| Right click                | Opens the window menu, leaving the window as it is.                 |
-| Tap                        | Same as a left click.                                               |
-| Drag with a finger         | Same as a left drag.                                                |
-| Press and hold with a finger | Same as a right click.                                            |
+| Gesture                      | Result                                                          |
+| ---------------------------- | --------------------------------------------------------------- |
+| Left click (on release)      | Activates the window and brings it to the front.                |
+| Left drag                    | Activates the window and moves it, starting from the thumbnail. |
+| Right click                  | Opens the window menu, leaving the window as it is.             |
+| Tap                          | Same as a left click.                                           |
+| Drag with a finger           | Same as a left drag.                                            |
+| Press and hold with a finger | Same as a right click.                                          |
 
 A drag picks the window up where its thumbnail is, not where the window really sits: the window
 appears at full size around the thumbnail and follows the pointer (or the finger) from there.
@@ -51,21 +51,26 @@ System Settings applies here too.
 
 Found under System Settings, Desktop Effects, next to the effect's entry.
 
-| Setting                   | Default     | Meaning                                                    |
-| ------------------------- | ----------- | ---------------------------------------------------------- |
-| Windows kept above others | skipped     | Windows with "Keep above others" stay where they are.      |
-| Windows on all desktops   | skipped     | Windows shown on every desktop stay where they are.        |
-| Maximized windows         | skipped     | Maximized and fullscreen windows stay where they are.      |
-| Parent windows            | skipped     | Windows that own a dialog stay where they are.             |
-| Child windows             | not skipped | Dialogs and other transient windows may become thumbnails. |
-| Initial thumbnail size    | 50%         | Size a thumbnail is tried at first.                        |
-| Minimum thumbnail size    | 15%         | Smallest size the search may fall back to.                 |
-| Window icons              | shown       | Icon drawn to the left of the title of each thumbnail.     |
-| Window titles             | shown       | Title drawn on a plate at the bottom of each thumbnail.    |
-| Thumbnail opacity         | 70%         | Opacity of a thumbnail; a hovered one fades to opaque.     |
+| Setting                   | Default     | Meaning                                                     |
+| ------------------------- | ----------- | ----------------------------------------------------------- |
+| Windows kept above others | skipped     | Windows with "Keep above others" stay where they are.       |
+| Windows on all desktops   | skipped     | Windows shown on every desktop stay where they are.         |
+| Maximized windows         | skipped     | Maximized and fullscreen windows stay where they are.       |
+| Parent windows            | skipped     | Windows that own a dialog stay where they are.              |
+| Child windows             | not skipped | Dialogs and other transient windows may become thumbnails.  |
+| Initial thumbnail size    | 50%         | Size a thumbnail is tried at first.                         |
+| Minimum thumbnail size    | 15%         | Smallest size the search may fall back to.                  |
+| Window icons              | shown       | Icon drawn to the left of the title of each thumbnail.      |
+| Window titles             | shown       | Title drawn on a plate at the bottom of each thumbnail.     |
+| Thumbnail opacity         | 70%         | Opacity of a thumbnail; a hovered one fades to opaque.      |
+| 3D angle                  | 45°         | How far a resting thumbnail is turned away from the viewer. |
 
 A skipped window stays out of the effect altogether: it never becomes a thumbnail, and it never
 pushes another window into one, however much of it the skipped window covers.
+
+Thumbnails at rest are turned towards their original window positions, as if lying at an angle to the screen. The
+turn flattens out under the pointer, so a hovered thumbnail is always seen head on; setting the
+angle to zero leaves them flat throughout.
 
 The icon and the title fade out while a thumbnail is hovered, and a thumbnail too small to hold them
 goes without.

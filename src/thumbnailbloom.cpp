@@ -5,6 +5,7 @@
 */
 
 #include "thumbnailbloom.h"
+#include "thumbnailbend.h"
 #include "thumbnailbloomconfig.h"
 #include "thumbnailoverlay.h"
 
@@ -26,7 +27,9 @@
 #include <KColorScheme>
 
 #include <QHash>
+#include <QPolygonF>
 #include <QSet>
+#include <QTransform>
 #include <QVector2D>
 
 #include <algorithm>
@@ -49,6 +52,16 @@ namespace ThumbnailBloom
  * configurable yet, hence the constant rather than a setting.
  */
 constexpr bool reducedMotion = true;
+
+/*!
+ * How finely a bent thumbnail is cut up before its vertices are moved.
+ *
+ * Texture coordinates are interpolated linearly inside a quad, so a quad drawn
+ * as a trapezoid would still be textured as if it were a rectangle. Splitting
+ * the window into a grid this size leaves each cell small enough for that error
+ * to disappear, which is what makes the pixels perspective correct.
+ */
+constexpr int bendSubdivisions = 16;
 
 /*! Returns the rectangle \a progress of the way from \a from to \a to. */
 static QRectF interpolateRect(const QRectF &from, const QRectF &to, qreal progress)
@@ -527,6 +540,14 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
 
     m_thumbnailOpacity = std::clamp(ThumbnailBloomConfig::opacity() / 100.0, 0.1, 1.0);
 
+    // Redirecting a window into a texture costs a render pass per frame, so it
+    // is only done while there is a bend to draw; turning the angle down to zero
+    // hands every window that is already blooming back to the ordinary path.
+    m_bendAngle = std::clamp<qreal>(ThumbnailBloomConfig::bendAngle(), 0.0, 60.0);
+    for (auto &[w, state] : m_states) {
+        setRedirected(w, state, m_bendAngle > 0.0);
+    }
+
     // The system's animation speed is already folded into animationTime().
     m_animationDuration = std::max(std::chrono::milliseconds(1), animationTime(std::chrono::milliseconds(250)));
 
@@ -664,6 +685,15 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // pointer, and on the way back to the real window it is gone before the
     // window is itself again.
     const qreal targetCaption = (thumbnail && !state.hovered) ? 1.0 : 0.0;
+    // The bend belongs to the resting thumbnail just as the caption does: it
+    // flattens out under the pointer, so a hovered window is seen head on, and it
+    // is gone before the window is back where it really is.
+    const qreal targetBend = targetCaption;
+
+    // Nothing is bent unless it is painted through an offscreen texture, and
+    // that is decided per window rather than once, since a state can be inserted
+    // long after the effect was configured.
+    setRedirected(w, state, m_bendAngle > 0.0);
 
     // The click target follows the resting rectangle, not the animation: a
     // thumbnail can be hovered and clicked from the moment it sets off, but only
@@ -674,8 +704,9 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
         state.from = state.current = state.to = QRectF(w->frameGeometry());
         state.fromOpacity = state.currentOpacity = state.toOpacity = 1.0;
         state.fromCaption = state.currentCaption = state.toCaption = 0.0;
+        state.fromBend = state.currentBend = state.toBend = 0.0;
     } else if (sameRect(state.to, target) && qFuzzyCompare(state.toOpacity, targetOpacity)
-               && qFuzzyCompare(state.toCaption, targetCaption)) {
+               && qFuzzyCompare(state.toCaption, targetCaption) && qFuzzyCompare(state.toBend, targetBend)) {
         return;
     }
 
@@ -697,10 +728,12 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     state.to = target;
     state.toOpacity = targetOpacity;
     state.toCaption = targetCaption;
+    state.toBend = targetBend;
 
     state.from = state.current;
     state.fromOpacity = state.currentOpacity;
     state.fromCaption = state.currentCaption;
+    state.fromBend = state.currentBend;
     state.timeline.setEasingCurve((inserted || state.timeline.done()) ? QEasingCurve::InOutCubic
                                                                      : QEasingCurve::OutCubic);
     state.timeline.setDuration(m_animationDuration);
@@ -833,6 +866,14 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
     // input dispatch, where destroying an internal window is not survivable;
     // its signals are cut right away so a click in the meantime cannot reach
     // the window pointer that is about to go stale.
+    // The offscreen texture goes with the state. The window may already be gone
+    // here (this also runs on windowClosed and windowDeleted), which is why the
+    // flag is asked rather than the effect being told to unredirect blindly.
+    const auto it = m_states.find(w);
+    if (it != m_states.end()) {
+        setRedirected(w, it->second, false);
+    }
+
     auto node = m_states.extract(w);
     if (!node.empty()) {
         for (OverlayWindow *window : {static_cast<OverlayWindow *>(node.mapped().overlay.release()),
@@ -1144,6 +1185,76 @@ bool ThumbnailBloomEffect::isMaximized(EffectWindow *w) const
 // Painting
 // ---------------------------------------------------------------------------
 
+void ThumbnailBloomEffect::setRedirected(EffectWindow *w, BloomState &state, bool redirected)
+{
+    redirected = redirected && OffscreenEffect::supported();
+    if (state.redirected == redirected) {
+        return;
+    }
+
+    state.redirected = redirected;
+    if (redirected) {
+        redirect(w);
+    } else {
+        unredirect(w);
+    }
+}
+
+void ThumbnailBloomEffect::apply(EffectWindow *window, int mask, WindowPaintData &data, WindowQuadList &quads)
+{
+    Q_UNUSED(mask)
+    Q_UNUSED(data)
+
+    const auto it = m_states.find(window);
+    if (it == m_states.end() || it->second.currentBend <= 0.0) {
+        return;
+    }
+
+    const BloomState &bloomState = it->second;
+
+    // Window coordinates: the frame geometry sits at the origin and everything
+    // painted around it (the shadow, the decoration) reaches outside it, into
+    // negative coordinates above and to the left. The bend is worked out on the
+    // frame alone and the scale and the translation that put the thumbnail on the
+    // screen are applied to the result afterwards, by applyTransform().
+    const QRectF frame(QPointF(0, 0), QRectF(window->frameGeometry()).size());
+    if (frame.isEmpty()) {
+        return;
+    }
+
+    // Calculate the bend direction and angle strength
+    // For now the angle is fixed and only modulated by the animation.
+    // There is an idea to make angles more dynamic, affected by the distance
+    const QPointF offset =
+        QRectF(window->frameGeometry()).center() - bloomState.current.center();
+    QVector2D bendDirection = {(float)offset.x(), (float)offset.y()};
+    bendDirection.normalize();
+
+    const BendQuad bent =
+        bendQuad(frame, m_bendAngle * bloomState.currentBend, bendDirection);
+    const QPolygonF flat({frame.topLeft(), frame.topRight(), frame.bottomRight(), frame.bottomLeft()});
+    QTransform transform;
+    if (!QTransform::quadToQuad(flat, QPolygonF({bent[0], bent[1], bent[2], bent[3]}), transform)) {
+        return;
+    }
+
+    // The transform is projective, so mapping a vertex through it is the whole
+    // perspective: what the subdivision adds is that every cell of the grid gets
+    // its own corners mapped, and the texture inside it is stretched between
+    // them instead of across the window as a whole. Everything outside the frame
+    // rides along on the same map, which keeps the shadow attached to the edge
+    // it belongs to.
+    quads = quads.makeRegularGrid(bendSubdivisions, bendSubdivisions);
+    for (WindowQuad &quad : quads) {
+        for (int i = 0; i < 4; ++i) {
+            WindowVertex &vertex = quad[i];
+            const QPointF mapped = transform.map(QPointF(vertex.x(), vertex.y()));
+            vertex.setX(mapped.x());
+            vertex.setY(mapped.y());
+        }
+    }
+}
+
 void ThumbnailBloomEffect::applyTransform(EffectWindow *w, const BloomState &state, WindowPaintData &data) const
 {
     const QRectF natural = w->frameGeometry();
@@ -1170,6 +1281,7 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         state.current = interpolateRect(state.from, state.to, progress);
         state.currentOpacity = state.fromOpacity * (1.0 - progress) + state.toOpacity * progress;
         state.currentCaption = state.fromCaption * (1.0 - progress) + state.toCaption * progress;
+        state.currentBend = state.fromBend * (1.0 - progress) + state.toBend * progress;
         if (state.overlay) {
             state.overlay->setCaptionOpacity(state.currentCaption);
         }

@@ -9,6 +9,7 @@
 #include "bloomlayout.h"
 
 #include <effect/effect.h>
+#include <effect/offscreeneffect.h>
 #include <effect/timeline.h>
 #include <input.h>
 
@@ -137,8 +138,13 @@ private:
  * Windows are never really moved or resized: they are painted scaled down and
  * translated, and a transparent click target (ThumbnailOverlay) is put on top
  * of each finished thumbnail so that it can be clicked into focus.
+ *
+ * It is an OffscreenEffect because of the 3D bend: a resting thumbnail is drawn
+ * turned away from the viewer, and nothing in WindowPaintData can express that.
+ * A window redirected into a texture is deformed vertex by vertex instead, which
+ * is what apply() does.
  */
-class ThumbnailBloomEffect : public KWin::Effect
+class ThumbnailBloomEffect : public KWin::OffscreenEffect
 {
     Q_OBJECT
 
@@ -174,6 +180,10 @@ private:
         qreal fromCaption = 0.0; //!< caption opacity the running animation started at
         qreal toCaption = 0.0; //!< caption opacity the animation ends at
         qreal currentCaption = 0.0; //!< caption opacity the click target paints with
+        qreal fromBend = 0.0; //!< bend strength the running animation started at
+        qreal toBend = 0.0; //!< bend strength the animation ends at
+        qreal currentBend = 0.0; //!< bend strength the current frame is drawn with, 0 flat, 1 full angle
+        bool redirected = false; //!< whether the window is being painted through an offscreen texture
         bool hovered = false; //!< whether the pointer is on the thumbnail
         QRegion hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
@@ -208,6 +218,19 @@ private:
     void startThumbnailMove(KWin::EffectWindow *w, const QPointF &pos, qint32 touchId);
     /*! Drops \a w's state, hiding its click target right away. */
     void forget(KWin::EffectWindow *w);
+    /*!
+     * Bends the offscreen texture of \a window, which is what makes it look 3D.
+     *
+     * The quads arrive in window coordinates, with the frame geometry at the
+     * origin, and are mapped through the projective transform that takes the
+     * frame rectangle onto its bent corners. They are subdivided first: the
+     * texture coordinates of a quad are interpolated linearly across it, so a
+     * single quad would be textured as if it were flat, and only cutting it into
+     * a grid small enough makes the pixels follow the perspective.
+     */
+    void apply(KWin::EffectWindow *window, int mask, KWin::WindowPaintData &data, KWin::WindowQuadList &quads) override;
+    /*! Redirects \a w into an offscreen texture, or stops doing so, as \a redirected asks. */
+    void setRedirected(KWin::EffectWindow *w, BloomState &state, bool redirected);
     /*! Applies the thumbnail transformation of \a state to \a data. */
     void applyTransform(KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
     /*! Whether \a w is one of the thumbnails drawn above the windows covering them. */
@@ -257,6 +280,7 @@ private:
     bool m_showIcons = true;
     bool m_showTitles = true;
     qreal m_thumbnailOpacity = 0.7; //!< opacity of a thumbnail that is not hovered
+    qreal m_bendAngle = 45.0; //!< angle a resting thumbnail is turned by, in degrees; 0 keeps them flat
     LayoutOptions m_layoutOptions;
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
     ShieldFilter m_shieldFilter;

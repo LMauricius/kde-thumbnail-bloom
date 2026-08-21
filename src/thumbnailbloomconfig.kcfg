@@ -51,6 +51,12 @@
             <label>Show the window title on each thumbnail</label>
             <default>true</default>
         </entry>
+        <entry name="BendAngle" type="Int">
+            <label>Angle the resting thumbnails are turned in 3D by, in degrees</label>
+            <default>45</default>
+            <min>0</min>
+            <max>60</max>
+        </entry>
         <entry name="Opacity" type="Int">
             <label>Thumbnail opacity, in percent</label>
             <default>90</default>
