@@ -18,6 +18,7 @@
 #include <QTimer>
 
 #include <memory>
+#include <vector>
 #include <unordered_map>
 
 namespace ThumbnailBloom
@@ -209,7 +210,9 @@ private:
     void forget(KWin::EffectWindow *w);
     /*! Applies the thumbnail transformation of \a state to \a data. */
     void applyTransform(KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
-    /*! Draws the lifted thumbnail, if it has not been drawn in this pass yet. */
+    /*! Whether \a w is one of the thumbnails drawn above the windows covering them. */
+    bool isLifted(KWin::EffectWindow *w) const;
+    /*! Draws the lifted thumbnails, least enlarged first, if they are still due in this pass. */
     void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport);
     /*! Draws the hover outline just inside \a rect, in logical screen coordinates. */
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, const QRectF &rect) const;
@@ -261,9 +264,9 @@ private:
     KWin::Region m_paintRegion; //!< device region the current pass repaints
     KWin::EffectWindow *m_menuOwner = nullptr; //!< window whose menu is open, kept focused meanwhile
     KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing
-    KWin::EffectWindow *m_liftedWindow = nullptr; //!< thumbnail drawn above the other windows
-    KWin::EffectWindow *m_liftAnchor = nullptr; //!< window it is drawn right after
-    bool m_liftPending = false; //!< whether it still has to be drawn in this pass
+    std::vector<KWin::EffectWindow *> m_lifted; //!< thumbnails drawn above the other windows, least enlarged first
+    KWin::EffectWindow *m_liftAnchor = nullptr; //!< window they are drawn right after, possibly one of them
+    bool m_liftPending = false; //!< whether they still have to be drawn in this pass
     bool m_skipKeepAbove = true;
     bool m_skipOnAllDesktops = true;
     bool m_skipMaximized = true;

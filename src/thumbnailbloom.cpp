@@ -81,6 +81,32 @@ static QRectF grownRect(const QRectF &rect, const QRectF &natural, const QRectF 
     return grown;
 }
 
+/*! Returns the value an animation at \a progress towards \a to must start at to be at \a current. */
+static qreal rebased(qreal current, qreal to, qreal progress)
+{
+    return (current - to * progress) / (1.0 - progress);
+}
+
+/*! Returns the rectangle version of rebased(), applied corner by corner. */
+static QRectF rebasedRect(const QRectF &current, const QRectF &to, qreal progress)
+{
+    return QRectF(rebased(current.x(), to.x(), progress),
+                  rebased(current.y(), to.y(), progress),
+                  rebased(current.width(), to.width(), progress),
+                  rebased(current.height(), to.height(), progress));
+}
+
+/*!
+ * Returns how much larger than its resting rectangle \a current is drawn.
+ *
+ * One while the thumbnail sits where the layout put it, more while the hover
+ * has it grown; it is what orders the lifted thumbnails among themselves.
+ */
+static qreal growth(const QRectF &current, const QRectF &base)
+{
+    return base.width() > 0 ? current.width() / base.width() : 1.0;
+}
+
 /*!
  * Returns the screen area a thumbnail of \a w resting at \a rect paints into.
  *
@@ -678,7 +704,20 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     state.to = target;
     state.toOpacity = targetOpacity;
     state.toCaption = targetCaption;
-    if (!inserted && !state.timeline.done()) {
+    // The start of the animation moves with the destination, though: the frame
+    // on screen has to come out of the interpolation unchanged, or the thumbnail
+    // jumps the moment the target changes. A hover reversed halfway would
+    // otherwise land straight on the resting rectangle, that being where the old
+    // start and the new destination nearly meet, and only the last of the way
+    // would be animated at all. Right at the end of the timeline there is no such
+    // start to be had (the division below goes to infinity), so those last few
+    // milliseconds take the restart path instead, where the jump is too small to
+    // see anyway.
+    const qreal progress = state.timeline.value();
+    if (!inserted && !state.timeline.done() && progress < 0.99) {
+        state.from = rebasedRect(state.current, state.to, progress);
+        state.fromOpacity = rebased(state.currentOpacity, state.toOpacity, progress);
+        state.fromCaption = rebased(state.currentCaption, state.toCaption, progress);
         m_animating = true;
         effects->addRepaintFull();
         return;
@@ -789,11 +828,10 @@ void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
 
     it->second.hovered = hovered;
 
-    // The lift outlives the hover: a thumbnail that is shrinking back has to
-    // stay above the windows it grew over until it has arrived.
-    if (hovered) {
-        m_liftedWindow = w;
-    }
+    // Nothing is lifted from here: the lift follows the size the thumbnail is
+    // actually drawn at, which the paint pass works out for itself. That is what
+    // keeps a thumbnail up while it shrinks back, the hover being long gone by
+    // then.
 
     // Never retarget from here. This runs either inside KWin's pointer dispatch
     // (through the cursor position signal) or inside the paint pass, and
@@ -805,9 +843,7 @@ void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
 
 void ThumbnailBloomEffect::forget(EffectWindow *w)
 {
-    if (m_liftedWindow == w) {
-        m_liftedWindow = nullptr;
-    }
+    std::erase(m_lifted, w);
     if (m_menuOwner == w) {
         m_menuOwner = nullptr;
         m_menuPopup = nullptr;
@@ -1173,17 +1209,31 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         }
     }
 
-    // The lift ends only once the thumbnail has come to rest again.
-    if (m_liftedWindow) {
-        const auto it = m_states.find(m_liftedWindow);
-        if (it == m_states.end() || (!it->second.hovered && it->second.timeline.done())) {
-            m_liftedWindow = nullptr;
+    // A thumbnail is lifted while the pointer has it grown, and stays lifted
+    // until it has shrunk all the way back: the hover is over the moment the
+    // pointer leaves, but the way back takes a whole animation, and dropping the
+    // thumbnail behind its neighbours at the first frame of it is a visible jump.
+    // The size it is drawn at is the test, so no timeline has to be consulted:
+    // between the hover ending and the relayout that retargets the animation the
+    // timeline is still the finished one of the way up.
+    //
+    // They are ordered by that same size, most enlarged last, so the thumbnails
+    // still on their way up cover the ones already on their way down.
+    m_lifted.clear();
+    for (const auto &[w, state] : m_states) {
+        if (state.hovered || growth(state.current, state.base) > 1.0 + 1e-3) {
+            m_lifted.push_back(w);
         }
     }
+    std::ranges::sort(m_lifted, [this](EffectWindow *a, EffectWindow *b) {
+        const BloomState &sa = m_states.at(a);
+        const BloomState &sb = m_states.at(b);
+        return growth(sa.current, sa.base) < growth(sb.current, sb.base);
+    });
 
-    // The lifted thumbnail is drawn right after the topmost window that covers
-    // it, and not after the whole screen: everything painted later (the popup
-    // layer the outlines live in, and the cursor) keeps painting over it.
+    // The lifted thumbnails are drawn right after the topmost window that covers
+    // any of them, and not after the whole screen: everything painted later (the
+    // popup layer the outlines live in, and the cursor) keeps painting over them.
     //
     // The click targets count as covering windows here, even though they are
     // above the whole stack rather than at a place in it: they are the surfaces
@@ -1195,20 +1245,24 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     // same repaint: a window that does not intersect the thumbnail may be left
     // out of a partial repaint, and the anchor has to be painted for the
     // thumbnail to be drawn at all.
+    //
+    // When nothing covers any of them they are already the topmost windows, but
+    // they still have to be drawn in one place to be ordered among themselves,
+    // so the topmost lifted one becomes the anchor and the set takes its turn.
     m_liftAnchor = nullptr;
-    if (m_liftedWindow) {
-        const BloomState &lifted = m_states.at(m_liftedWindow);
-        const QRectF thumbnail = lifted.current;
-
-        bool above = false;
+    if (!m_lifted.empty()) {
+        std::vector<QRect> passed; // thumbnails of the lifted windows already under the walk
         for (EffectWindow *w : effects->stackingOrder()) {
-            if (w == m_liftedWindow) {
+            if (isLifted(w)) {
                 // The stacking order runs bottom to top, so only what follows
                 // covers the thumbnail; anything below it is already covered.
-                above = true;
-            } else if (above && isRelevant(w)
-                       && w->frameGeometry().toRect().intersects(Rect(thumbnail.toAlignedRect()))) {
+                passed.push_back(m_states.at(w).current.toAlignedRect());
                 m_liftAnchor = w;
+            } else if (isRelevant(w)) {
+                const QRect frame = w->frameGeometry().toRect();
+                if (std::ranges::any_of(passed, [&](const QRect &r) { return frame.intersects(r); })) {
+                    m_liftAnchor = w;
+                }
             }
         }
     }
@@ -1251,11 +1305,14 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget, const R
         return;
     }
 
-    // The lifted thumbnail is left out at its own place in the stacking order and
-    // drawn again after the anchor: not chaining the call is what keeps a window
-    // out of a pass. Without an anchor it is already the topmost window and can
-    // simply be painted where it is.
-    if (w == m_liftedWindow && m_liftPending) {
+    // The lifted thumbnails are left out at their own places in the stacking
+    // order and drawn again after the anchor: not chaining the call is what keeps
+    // a window out of a pass. The anchor may be a lifted thumbnail itself, and
+    // then its own turn is where the whole set is drawn.
+    if (m_liftPending && isLifted(w)) {
+        if (w == m_liftAnchor) {
+            drawLifted(renderTarget, viewport);
+        }
         return;
     }
 
@@ -1270,11 +1327,12 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget, const R
 
     if (w == m_liftAnchor) {
         drawLifted(renderTarget, viewport);
-    } else if (w == m_liftedWindow && it != m_states.end()) {
-        // Nothing covers this thumbnail, so it was painted in place just now and
-        // only the outline is left to put on top of it.
-        drawOutline(renderTarget, viewport, it->second.current);
     }
+}
+
+bool ThumbnailBloomEffect::isLifted(EffectWindow *w) const
+{
+    return std::ranges::find(m_lifted, w) != m_lifted.end();
 }
 
 void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const RenderViewport &viewport)
@@ -1284,27 +1342,31 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const Re
     }
     m_liftPending = false;
 
-    const auto it = m_states.find(m_liftedWindow);
-    if (it == m_states.end()) {
-        return;
+    // Least enlarged first: the set is ordered that way, so the thumbnail the
+    // pointer is growing ends up over the ones it is leaving behind.
+    for (EffectWindow *w : m_lifted) {
+        const auto it = m_states.find(w);
+        if (it == m_states.end()) {
+            continue;
+        }
+
+        // The region is the clip of the draw, and it has to be the damage of the
+        // whole pass. The region the anchor was painted with is clipped to that
+        // window's own area for an opaque window, which cuts the thumbnail down to
+        // the part overlapping it; an infinite region has the opposite problem, since
+        // painting outside the damage blends the translucent parts of the thumbnail
+        // over pixels that were never cleared, so the shadow darkens frame by frame.
+        WindowPaintData data;
+        applyTransform(w, it->second, data);
+        effects->drawWindow(renderTarget, viewport, w,
+                            PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
+
+        // The caption of a lifted thumbnail follows it here, so that it ends up
+        // over the thumbnail rather than under it, like every other one does.
+        drawCaption(renderTarget, viewport, w);
+
+        drawOutline(renderTarget, viewport, it->second.current);
     }
-
-    // The region is the clip of the draw, and it has to be the damage of the
-    // whole pass. The region the anchor was painted with is clipped to that
-    // window's own area for an opaque window, which cuts the thumbnail down to
-    // the part overlapping it; an infinite region has the opposite problem, since
-    // painting outside the damage blends the translucent parts of the thumbnail
-    // over pixels that were never cleared, so the shadow darkens frame by frame.
-    WindowPaintData data;
-    applyTransform(m_liftedWindow, it->second, data);
-    effects->drawWindow(renderTarget, viewport, m_liftedWindow,
-                        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
-
-    // The caption of the lifted thumbnail follows it here, so that it ends up
-    // over the thumbnail rather than under it, like every other one does.
-    drawCaption(renderTarget, viewport, m_liftedWindow);
-
-    drawOutline(renderTarget, viewport, it->second.current);
 }
 
 void ThumbnailBloomEffect::drawCaption(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w)
@@ -1390,7 +1452,7 @@ void ThumbnailBloomEffect::postPaintScreen()
     // below the thumbnail without ever reaching the anchor, and the thumbnail is
     // erased wherever that happens. Repainting everything, exactly as the
     // animations do, is what keeps every thumbnail whole.
-    if (m_animating || m_liftedWindow) {
+    if (m_animating || !m_lifted.empty()) {
         effects->addRepaintFull();
     }
 
