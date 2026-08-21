@@ -175,25 +175,40 @@ public:
 
 private:
     /*!
+     * One animated value: where the running trip started, where it ends, and
+     * what the current frame uses. Pure data; the TimeLine driving the progress
+     * lives in BloomState, one for all four channels.
+     */
+    template <typename T>
+    struct Animated
+    {
+        T from { }; //!< value the running animation started at
+        T to { }; //!< value the animation ends at
+        T current { }; //!< value used by the current frame
+
+        /*! Puts the channel at \a value with no trip in flight. */
+        void snap(const T &value) { from = to = current = value; }
+        /*! Starts a fresh trip from wherever the channel is now towards \a target. */
+        void restart(const T &target)
+        {
+            from = current;
+            to = target;
+        }
+        /*! Linear blend of from and to at \a progress into current. */
+        void interpolate(qreal progress);
+    };
+
+    /*!
      * Everything the effect keeps around for one bloomed window: where its
      * thumbnail travels from and to, and its click target.
      */
     struct BloomState
     {
         QRectF base; //!< rectangle the layout asked for, before any hover growth
-        QRectF from; //!< rectangle the running animation started at
-        QRectF to; //!< rectangle the animation ends at
-        QRectF current; //!< rectangle used by the current frame
-        qreal fromOpacity = 1.0; //!< opacity the running animation started at
-        qreal toOpacity = 1.0; //!< opacity the animation ends at
-        qreal currentOpacity = 1.0; //!< opacity used by the current frame
-        qreal fromCaption = 0.0; //!< caption opacity the running animation started at
-        qreal toCaption = 0.0; //!< caption opacity the animation ends at
-        qreal currentCaption = 0.0; //!< caption opacity the click target paints with
-        qreal fromBend = 0.0; //!< bend strength the running animation started at
-        qreal toBend = 0.0; //!< bend strength the animation ends at
-        qreal currentBend
-            = 0.0; //!< bend strength the current frame is drawn with, 0 flat, 1 full angle
+        Animated<QRectF> rect; //!< rectangle the thumbnail is painted in
+        Animated<qreal> opacity; //!< thumbnail opacity, 1.0 when hovered or at home
+        Animated<qreal> caption; //!< caption opacity the click target paints with
+        Animated<qreal> bend; //!< bend strength, 0 flat, 1 full angle
         bool redirected
             = false; //!< whether the window is being painted through an offscreen texture
         bool hovered = false; //!< whether the pointer is on the thumbnail

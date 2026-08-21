@@ -78,11 +78,19 @@ static QVector2D bendDirection(EffectWindow *w, const QRectF &rect)
     return direction;
 }
 
-/*! Returns the rectangle \a progress of the way from \a from to \a to. */
-static QRectF interpolateRect(const QRectF &from, const QRectF &to, qreal progress)
+template <typename T>
+void ThumbnailBloomEffect::Animated<T>::interpolate(qreal progress)
+{
+    current = from * (1.0 - progress) + to * progress;
+}
+
+// QRectF has no arithmetic of its own, so the rectangle channel blends by
+// component.
+template <>
+void ThumbnailBloomEffect::Animated<QRectF>::interpolate(qreal progress)
 {
     const qreal inverse = 1.0 - progress;
-    return QRectF(from.x() * inverse + to.x() * progress, from.y() * inverse + to.y() * progress,
+    current = QRectF(from.x() * inverse + to.x() * progress, from.y() * inverse + to.y() * progress,
         from.width() * inverse + to.width() * progress,
         from.height() * inverse + to.height() * progress);
 }
@@ -617,7 +625,7 @@ void ThumbnailBloomEffect::watch(EffectWindow *w)
         const auto it = m_states.find(window);
         if (it != m_states.end()) {
             effects->addRepaint(
-                RectF(thumbnailBounds(window, it->second.current).adjusted(-1, -1, 1, 1)));
+                RectF(thumbnailBounds(window, it->second.rect.current).adjusted(-1, -1, 1, 1)));
         }
     });
 }
@@ -738,13 +746,13 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     updateOverlay(w, state);
 
     if (inserted) {
-        state.from = state.current = state.to = QRectF(w->frameGeometry());
-        state.fromOpacity = state.currentOpacity = state.toOpacity = 1.0;
-        state.fromCaption = state.currentCaption = state.toCaption = 0.0;
-        state.fromBend = state.currentBend = state.toBend = 0.0;
-    } else if (sameRect(state.to, target) && qFuzzyCompare(state.toOpacity, targetOpacity)
-        && qFuzzyCompare(state.toCaption, targetCaption)
-        && qFuzzyCompare(state.toBend, targetBend)) {
+        state.rect.snap(QRectF(w->frameGeometry()));
+        state.opacity.snap(1.0);
+        state.caption.snap(0.0);
+        state.bend.snap(0.0);
+    } else if (sameRect(state.rect.to, target) && qFuzzyCompare(state.opacity.to, targetOpacity)
+        && qFuzzyCompare(state.caption.to, targetCaption)
+        && qFuzzyCompare(state.bend.to, targetBend)) {
         return;
     }
 
@@ -763,15 +771,10 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // in motion therefore switches to a curve that starts at full speed and only
     // eases out, which picks up where the previous trip left off closely enough
     // for the eye and follows a moving target frame by frame.
-    state.to = target;
-    state.toOpacity = targetOpacity;
-    state.toCaption = targetCaption;
-    state.toBend = targetBend;
-
-    state.from = state.current;
-    state.fromOpacity = state.currentOpacity;
-    state.fromCaption = state.currentCaption;
-    state.fromBend = state.currentBend;
+    state.rect.restart(target);
+    state.opacity.restart(targetOpacity);
+    state.caption.restart(targetCaption);
+    state.bend.restart(targetBend);
     state.timeline.setEasingCurve(
         (inserted || state.timeline.done()) ? QEasingCurve::InOutCubic : QEasingCurve::OutCubic);
     state.timeline.setDuration(m_animationDuration);
@@ -937,7 +940,7 @@ void ThumbnailBloomEffect::startThumbnailMove(EffectWindow *w, const QPointF &po
     // its own size, centred on the rectangle the pointer or the finger is
     // actually on, kept inside the work area.
     QRectF target(QPointF(), QRectF(w->frameGeometry()).size());
-    target.moveCenter(it->second.current.center());
+    target.moveCenter(it->second.rect.current.center());
     target = window->keepInArea(target, effects->clientArea(MaximizeArea, w));
 
     // Activating first is what makes the drag count as using the window; the
@@ -986,7 +989,7 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
             // it. It must not act as a thumbnail any more though, so it is made
             // output only; the state (and with it the window) is dropped once
             // the trip ends.
-            if (goingHome && state.currentCaption > 0) {
+            if (goingHome && state.caption.current > 0) {
                 state.overlay->setOutputOnly(true);
             } else {
                 state.overlay->hide();
@@ -1013,7 +1016,7 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     // thumbnail the compositor paints exactly once per frame.
     state.overlay->setCaption(
         m_showIcons ? w->icon() : QIcon(), m_showTitles ? w->caption() : QString());
-    state.overlay->setCaptionOpacity(state.currentCaption);
+    state.overlay->setCaptionOpacity(state.caption.current);
 
     // The resting rectangle, never the current one: the click target must not
     // travel with the animation, and never grows with the hover either.
@@ -1242,7 +1245,7 @@ void ThumbnailBloomEffect::apply(
     EffectWindow *window, int /*mask*/, WindowPaintData & /*data*/, WindowQuadList &quads)
 {
     const auto it = m_states.find(window);
-    if (it == m_states.end() || it->second.currentBend <= 0.0) {
+    if (it == m_states.end() || it->second.bend.current <= 0.0) {
         return;
     }
 
@@ -1258,8 +1261,8 @@ void ThumbnailBloomEffect::apply(
         return;
     }
 
-    const QTransform transform = bendTransform(
-        frame, m_bendAngle * bloomState.currentBend, bendDirection(window, bloomState.current));
+    const QTransform transform = bendTransform(frame, m_bendAngle * bloomState.bend.current,
+        bendDirection(window, bloomState.rect.current));
 
     // The transform is projective, so mapping a vertex through it is the whole
     // perspective: what the subdivision adds is that every cell of the grid gets
@@ -1288,11 +1291,11 @@ void ThumbnailBloomEffect::applyTransform(
 
     // Scaling happens around the window's top left corner, so the translation is
     // expressed in unscaled screen coordinates.
-    data.setScale(QVector2D(
-        state.current.width() / natural.width(), state.current.height() / natural.height()));
-    data.setXTranslation(state.current.x() - natural.x());
-    data.setYTranslation(state.current.y() - natural.y());
-    data.multiplyOpacity(state.currentOpacity);
+    data.setScale(QVector2D(state.rect.current.width() / natural.width(),
+        state.rect.current.height() / natural.height()));
+    data.setXTranslation(state.rect.current.x() - natural.x());
+    data.setYTranslation(state.rect.current.y() - natural.y());
+    data.multiplyOpacity(state.opacity.current);
 }
 
 void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
@@ -1303,12 +1306,12 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     for (auto &[w, state] : m_states) {
         state.timeline.advance(data.view);
         const qreal progress = state.timeline.value();
-        state.current = interpolateRect(state.from, state.to, progress);
-        state.currentOpacity = state.fromOpacity * (1.0 - progress) + state.toOpacity * progress;
-        state.currentCaption = state.fromCaption * (1.0 - progress) + state.toCaption * progress;
-        state.currentBend = state.fromBend * (1.0 - progress) + state.toBend * progress;
+        state.rect.interpolate(progress);
+        state.opacity.interpolate(progress);
+        state.caption.interpolate(progress);
+        state.bend.interpolate(progress);
         if (state.overlay) {
-            state.overlay->setCaptionOpacity(state.currentCaption);
+            state.overlay->setCaptionOpacity(state.caption.current);
         }
 
         if (!state.timeline.done()) {
@@ -1318,7 +1321,7 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 
         // A thumbnail that has arrived back at its window is not a thumbnail
         // any more. Click targets are placed by the relayout, not from here.
-        if (sameRect(state.to, QRectF(w->frameGeometry()))) {
+        if (sameRect(state.rect.to, QRectF(w->frameGeometry()))) {
             settledBack.push_back(w);
         }
     }
@@ -1335,14 +1338,14 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
     // still on their way up cover the ones already on their way down.
     m_lifted.clear();
     for (const auto &[w, state] : m_states) {
-        if (state.hovered || growth(state.current, state.base) > 1.0 + 1e-3) {
+        if (state.hovered || growth(state.rect.current, state.base) > 1.0 + 1e-3) {
             m_lifted.push_back(w);
         }
     }
     std::ranges::sort(m_lifted, [this](EffectWindow *a, EffectWindow *b) {
         const BloomState &sa = m_states.at(a);
         const BloomState &sb = m_states.at(b);
-        return growth(sa.current, sa.base) < growth(sb.current, sb.base);
+        return growth(sa.rect.current, sa.base) < growth(sb.rect.current, sb.base);
     });
 
     // The lifted thumbnails are drawn right after the topmost window that covers
@@ -1370,7 +1373,7 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
             if (isLifted(w)) {
                 // The stacking order runs bottom to top, so only what follows
                 // covers the thumbnail; anything below it is already covered.
-                passed.push_back(m_states.at(w).current.toAlignedRect());
+                passed.push_back(m_states.at(w).rect.current.toAlignedRect());
                 m_liftAnchor = w;
             } else if (isRelevant(w)) {
                 const QRect frame = w->frameGeometry().toRect();
@@ -1399,8 +1402,8 @@ void ThumbnailBloomEffect::prePaintWindow(
 {
     const auto it = m_states.find(w);
     if (it != m_states.end()
-        && (!sameRect(it->second.current, QRectF(w->frameGeometry()))
-            || it->second.currentOpacity < 1.0)) {
+        && (!sameRect(it->second.rect.current, QRectF(w->frameGeometry()))
+            || it->second.opacity.current < 1.0)) {
         // The window is painted somewhere else and at another size, so it may
         // neither be clipped against nor culled by its real geometry.
         data.setTransformed();
@@ -1515,7 +1518,7 @@ void ThumbnailBloomEffect::drawCaption(
 void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
     const RenderViewport &viewport, EffectWindow *w, const BloomState &state) const
 {
-    const QRectF rect = state.current;
+    const QRectF rect = state.rect.current;
     if (!effects->isOpenGLCompositing() || rect.isEmpty()) {
         return;
     }
@@ -1527,7 +1530,7 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
     // recedes, as the frame of a turned surface has to be.
     const qreal width = std::min(outlineWidth, std::min(rect.width(), rect.height()) / 3.0);
     const QTransform transform
-        = bendTransform(rect, m_bendAngle * state.currentBend, bendDirection(w, rect));
+        = bendTransform(rect, m_bendAngle * state.bend.current, bendDirection(w, rect));
 
     // The projection matrix of the viewport orthos over the render rect scaled by
     // the output scale, so the vertices are logical screen coordinates multiplied
