@@ -289,16 +289,23 @@ void ShieldFilter::setState(
     m_thumbnails = thumbnails;
 }
 
-Window *ShieldFilter::windowBelow(const QPointF &pos) const
+Window *ShieldFilter::hitWindow(const QPointF &pos, const Window *stopAt) const
 {
     // The same walk InputRedirection::findToplevel() does, minus what must not
     // answer here: the bloomed windows, which are not painted where they are,
     // and the internal windows, which are the effect's own shields and click
     // targets. KWin's other internal surfaces are cut out of the shields long
     // before this, so skipping all of them takes nothing away.
+    //
+    // \a stopAt ends the walk empty-handed, and it does so before the skips: a
+    // minimized or bloomed stop window must still stop the walk, so that only
+    // what is genuinely stacked above it can answer.
     const QList<Window *> &stacking = workspace()->stackingOrder();
     for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
         Window *window = *it;
+        if (window == stopAt) {
+            return nullptr;
+        }
         if (window->isDeleted() || window->isMinimized() || window->isHidden()
             || window->isHiddenByShowDesktop()) {
             continue;
@@ -318,41 +325,13 @@ Window *ShieldFilter::windowBelow(const QPointF &pos) const
     return nullptr;
 }
 
+Window *ShieldFilter::windowBelow(const QPointF &pos) const { return hitWindow(pos, nullptr); }
+
 bool ShieldFilter::isCovered(Window *window, const QPointF &pos) const
 {
-    // The same walk as windowBelow(), stopped at the bloomed window itself:
-    // whatever answers the hit test before it is reached is stacked above it,
-    // and so is painted over its thumbnail. Everything that is not a window of
-    // its own (the effect's click targets and shields, KWin's own surfaces) is
-    // skipped, and so are the other bloomed windows, which are not painted where
-    // they are either.
-    if (!window) {
-        return false;
-    }
-
-    const QList<Window *> &stacking = workspace()->stackingOrder();
-    for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
-        Window *candidate = *it;
-        if (candidate == window) {
-            return false;
-        }
-        if (candidate->isDeleted() || candidate->isMinimized() || candidate->isHidden()
-            || candidate->isHiddenByShowDesktop()) {
-            continue;
-        }
-        if (!candidate->isOnCurrentActivity() || !candidate->isOnCurrentDesktop()
-            || !candidate->readyForPainting()) {
-            continue;
-        }
-        if (candidate->isInternal() || m_bloomed.contains(candidate)) {
-            continue;
-        }
-        if (candidate->hitTest(pos)) {
-            return true;
-        }
-    }
-
-    return false;
+    // Whatever answers the hit test before the bloomed window is reached is
+    // stacked above it, and so is painted over its thumbnail.
+    return window && hitWindow(pos, window) != nullptr;
 }
 
 const ShieldFilter::Thumbnail *ShieldFilter::thumbnailAt(const QPointF &pos) const

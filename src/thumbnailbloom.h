@@ -92,6 +92,12 @@ private:
      * InputDeviceHandlers and both are pointed at a shield the same way.
      */
     void redirect(KWin::InputDeviceHandler *device, const QPointF &pos);
+    /*!
+     * Returns the topmost window at \a pos that is neither bloomed nor one of
+     * ours, walking the stacking order with KWin's own hit test. The walk stops
+     * empty-handed when it reaches \a stopAt.
+     */
+    KWin::Window *hitWindow(const QPointF &pos, const KWin::Window *stopAt) const;
     /*! Returns the topmost window at \a pos that is neither bloomed nor one of ours. */
     KWin::Window *windowBelow(const QPointF &pos) const;
     /*! Returns the thumbnail whose click target holds \a pos, if there is one. */
