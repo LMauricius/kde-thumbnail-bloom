@@ -8,6 +8,7 @@
 
 #include <QPointF>
 #include <QRectF>
+#include <QTransform>
 #include <QVector2D>
 
 #include <array>
@@ -38,5 +39,15 @@ using BendQuad = std::array<QPointF, 4>;
  * the corners of \a rect unchanged.
  */
 BendQuad bendQuad(const QRectF &rect, qreal angle, const QVector2D &direction);
+
+/*!
+ * Returns the projective transform taking \a rect onto its bent corners.
+ *
+ * The map of the bend itself, so that everything drawn on a thumbnail (its
+ * pixels, the outline around it) can be put through the same one and can never
+ * drift apart. Whatever lies outside \a rect is carried along with it. The
+ * identity when there is nothing to bend, so callers need no special case.
+ */
+QTransform bendTransform(const QRectF &rect, qreal angle, const QVector2D &direction);
 
 } // namespace ThumbnailBloom

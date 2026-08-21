@@ -53,7 +53,7 @@
         </entry>
         <entry name="BendAngle" type="Int">
             <label>Angle the resting thumbnails are turned in 3D by, in degrees</label>
-            <default>45</default>
+            <default>15</default>
             <min>0</min>
             <max>60</max>
         </entry>

@@ -237,8 +237,15 @@ private:
     bool isLifted(KWin::EffectWindow *w) const;
     /*! Draws the lifted thumbnails, least enlarged first, if they are still due in this pass. */
     void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport);
-    /*! Draws the hover outline just inside \a rect, in logical screen coordinates. */
-    void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, const QRectF &rect) const;
+    /*!
+     * Draws the hover outline just inside the thumbnail of \a w, in logical
+     * screen coordinates.
+     *
+     * The whole \a state is taken rather than a rectangle, because the outline
+     * is turned by the same bend as the pixels of the thumbnail and needs the
+     * strength this frame is drawn with.
+     */
+    void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport, KWin::EffectWindow *w, const BloomState &state) const;
     /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
     /*!

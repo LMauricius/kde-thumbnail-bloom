@@ -27,12 +27,12 @@
 #include <KColorScheme>
 
 #include <QHash>
-#include <QPolygonF>
 #include <QSet>
 #include <QTransform>
 #include <QVector2D>
 
 #include <algorithm>
+#include <array>
 #include <vector>
 
 using namespace KWin;
@@ -62,6 +62,22 @@ constexpr bool reducedMotion = true;
  * to disappear, which is what makes the pixels perspective correct.
  */
 constexpr int bendSubdivisions = 16;
+
+/*!
+ * Returns the side the thumbnail of \a w resting at \a rect turns away towards.
+ *
+ * The window's real place, seen from the thumbnail: a thumbnail leans towards
+ * the window it belongs to, which points at where clicking it leads. Only the
+ * direction is taken, the angle itself comes from the settings; there is an idea
+ * to make the angle dynamic as well, from that same distance.
+ */
+static QVector2D bendDirection(EffectWindow *w, const QRectF &rect)
+{
+    const QPointF offset = QRectF(w->frameGeometry()).center() - rect.center();
+    QVector2D direction(offset.x(), offset.y());
+    direction.normalize();
+    return direction;
+}
 
 /*! Returns the rectangle \a progress of the way from \a from to \a to. */
 static QRectF interpolateRect(const QRectF &from, const QRectF &to, qreal progress)
@@ -131,13 +147,19 @@ static QRectF thumbnailBounds(EffectWindow *w, const QRectF &rect)
 //! Width of the hover outline, in logical pixels.
 constexpr qreal outlineWidth = 2.0;
 
-/*! Returns the two triangles covering \a rect, appended to \a vertices. */
-static void appendQuad(std::vector<QVector2D> &vertices, const QRectF &rect)
+/*!
+ * Returns the two triangles covering the quad \a corners, appended to \a vertices.
+ *
+ * The corners run clockwise from the top left, the order bendQuad() gives them
+ * in, and nothing here assumes the shape is a rectangle: a bent outline is four
+ * trapezoids.
+ */
+static void appendQuad(std::vector<QVector2D> &vertices, const std::array<QPointF, 4> &corners)
 {
-    const QVector2D topLeft(rect.left(), rect.top());
-    const QVector2D topRight(rect.right(), rect.top());
-    const QVector2D bottomLeft(rect.left(), rect.bottom());
-    const QVector2D bottomRight(rect.right(), rect.bottom());
+    const QVector2D topLeft(corners[0]);
+    const QVector2D topRight(corners[1]);
+    const QVector2D bottomRight(corners[2]);
+    const QVector2D bottomLeft(corners[3]);
     vertices.insert(vertices.end(), {topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight});
 }
 
@@ -1222,21 +1244,8 @@ void ThumbnailBloomEffect::apply(EffectWindow *window, int mask, WindowPaintData
         return;
     }
 
-    // Calculate the bend direction and angle strength
-    // For now the angle is fixed and only modulated by the animation.
-    // There is an idea to make angles more dynamic, affected by the distance
-    const QPointF offset =
-        QRectF(window->frameGeometry()).center() - bloomState.current.center();
-    QVector2D bendDirection = {(float)offset.x(), (float)offset.y()};
-    bendDirection.normalize();
-
-    const BendQuad bent =
-        bendQuad(frame, m_bendAngle * bloomState.currentBend, bendDirection);
-    const QPolygonF flat({frame.topLeft(), frame.topRight(), frame.bottomRight(), frame.bottomLeft()});
-    QTransform transform;
-    if (!QTransform::quadToQuad(flat, QPolygonF({bent[0], bent[1], bent[2], bent[3]}), transform)) {
-        return;
-    }
+    const QTransform transform = bendTransform(frame, m_bendAngle * bloomState.currentBend,
+                                               bendDirection(window, bloomState.current));
 
     // The transform is projective, so mapping a vertex through it is the whole
     // perspective: what the subdivision adds is that every cell of the grid gets
@@ -1454,7 +1463,7 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget, const Re
         // over the thumbnail rather than under it, like every other one does.
         drawCaption(renderTarget, viewport, w);
 
-        drawOutline(renderTarget, viewport, it->second.current);
+        drawOutline(renderTarget, viewport, w, it->second);
     }
 }
 
@@ -1480,27 +1489,44 @@ void ThumbnailBloomEffect::drawCaption(const RenderTarget &renderTarget, const R
                         PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
 }
 
-void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const RenderViewport &viewport, const QRectF &rect) const
+void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, const BloomState &state) const
 {
+    const QRectF rect = state.current;
     if (!effects->isOpenGLCompositing() || rect.isEmpty()) {
         return;
     }
 
-    // Four quads laid inside the edges of the thumbnail. The projection matrix of
-    // the viewport orthos over the render rect scaled by the output scale, so the
-    // vertices are logical screen coordinates multiplied by that scale (device
-    // pixels, but with the origin of the whole logical space, not of the output);
-    // on a screen scaled by 1 the two are the same, on any other one they are not.
+    // The outline is turned with the thumbnail, through the very map its pixels
+    // go through: same angle, same direction, same frame, so the two cannot drift
+    // apart however the bend is animated. The inset is taken before the map and
+    // not after, which is what makes the border thinner where the thumbnail
+    // recedes, as the frame of a turned surface has to be.
+    const qreal width = std::min(outlineWidth, std::min(rect.width(), rect.height()) / 3.0);
+    const QTransform transform = bendTransform(rect, m_bendAngle * state.currentBend,
+                                               bendDirection(w, rect));
+
+    // The projection matrix of the viewport orthos over the render rect scaled by
+    // the output scale, so the vertices are logical screen coordinates multiplied
+    // by that scale (device pixels, but with the origin of the whole logical
+    // space, not of the output); on a screen scaled by 1 the two are the same, on
+    // any other one they are not.
     const qreal scale = viewport.scale();
-    const QRectF scaled(rect.topLeft() * scale, rect.size() * scale);
-    const qreal width = outlineWidth * scale;
-    const QRectF inner = scaled.adjusted(width, width, -width, -width);
+    const auto corners = [&](const QRectF &box) {
+        return std::array<QPointF, 4>{transform.map(box.topLeft()) * scale,
+                                      transform.map(box.topRight()) * scale,
+                                      transform.map(box.bottomRight()) * scale,
+                                      transform.map(box.bottomLeft()) * scale};
+    };
+    const std::array<QPointF, 4> outer = corners(rect);
+    const std::array<QPointF, 4> inner = corners(rect.adjusted(width, width, -width, -width));
+
+    // One trapezoid per edge, between the outer corners and the inner ones.
     std::vector<QVector2D> vertices;
     vertices.reserve(24);
-    appendQuad(vertices, QRectF(scaled.left(), scaled.top(), scaled.width(), width));
-    appendQuad(vertices, QRectF(scaled.left(), inner.bottom(), scaled.width(), width));
-    appendQuad(vertices, QRectF(scaled.left(), inner.top(), width, inner.height()));
-    appendQuad(vertices, QRectF(inner.right(), inner.top(), width, inner.height()));
+    for (size_t i = 0; i < outer.size(); ++i) {
+        const size_t next = (i + 1) % outer.size();
+        appendQuad(vertices, {outer[i], outer[next], inner[next], inner[i]});
+    }
 
     GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
     vbo->reset();

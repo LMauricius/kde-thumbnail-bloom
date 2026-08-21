@@ -6,6 +6,7 @@
 
 #include "thumbnailbend.h"
 
+#include <QPolygonF>
 #include <QtMath>
 
 #include <algorithm>
@@ -88,6 +89,22 @@ BendQuad bendQuad(const QRectF &rect, qreal angle, const QVector2D &direction)
     }
 
     return bent;
+}
+
+QTransform bendTransform(const QRectF &rect, qreal angle, const QVector2D &direction)
+{
+    if (rect.isEmpty()) {
+        return QTransform();
+    }
+
+    const BendQuad bent = bendQuad(rect, angle, direction);
+    const QPolygonF flat({rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()});
+
+    QTransform transform;
+    if (!QTransform::quadToQuad(flat, QPolygonF({bent[0], bent[1], bent[2], bent[3]}), transform)) {
+        return QTransform();
+    }
+    return transform;
 }
 
 } // namespace ThumbnailBloom
