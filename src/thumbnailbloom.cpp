@@ -41,6 +41,15 @@ namespace ThumbnailBloom
 // Utilities
 // ---------------------------------------------------------------------------
 
+/*!
+ * Whether the layout holds still while a window is being dragged.
+ *
+ * Thumbnails rearranging under a moving window is a lot of motion for something
+ * the user is not looking at, so the whole pass waits for the drag to end. Not
+ * configurable yet, hence the constant rather than a setting.
+ */
+constexpr bool reducedMotion = true;
+
 /*! Returns the rectangle \a progress of the way from \a from to \a to. */
 static QRectF interpolateRect(const QRectF &from, const QRectF &to, qreal progress)
 {
@@ -156,6 +165,12 @@ static bool isInputTarget(EffectWindow *w)
 }
 
 /*! Returns whether \a a and \a b are the same rectangle for painting purposes. */
+/*! Whether the user is dragging a window around right now. */
+static bool userMoveInProgress() {
+  const Window *window = workspace()->moveResizeWindow();
+  return window && window->isInteractiveMove();
+}
+
 static bool sameRect(const QRectF &a, const QRectF &b)
 {
     constexpr qreal epsilon = 0.01;
@@ -478,6 +493,22 @@ void ThumbnailBloomEffect::relayout()
     // first.
     updateSystemRegion();
 
+    // Reduced motion: a drag freezes the layout. Every thumbnail keeps the
+    // rectangle it already has and nothing new blooms, so the only window that
+    // is retargeted is the dragged one itself, which is on its way back to its
+    // real geometry and has to keep following the pointer. The finish signal
+    // schedules the pass that catches the layout up.
+    if (reducedMotion && userMoveInProgress()) {
+      for (auto &[w, state] : m_states) {
+        retarget(w, w->isUserMove() ? QRectF(w->frameGeometry())
+                                    : QRectF(state.base));
+      }
+      updateShields();
+      raiseLiftedOverlay();
+      updateHover(effects->cursorPos());
+      return;
+    }
+
     // Windows something else is transient for, needed by the "skip parents" setting.
     QSet<EffectWindow *> parents;
     for (EffectWindow *w : stack) {
@@ -627,6 +658,18 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     const auto targetable = [](const BloomState &state) {
         return state.overlay && state.overlay->isVisible();
     };
+
+    // Reduced motion: a thumbnail growing under the pointer while a window is
+    // being dragged is motion nobody asked for, since the pointer is only
+    // passing over it on its way somewhere else. Nothing is hovered until the
+    // drag ends, and the pass the finish signal schedules picks the hover back
+    // up from wherever the pointer came to rest.
+    if (reducedMotion && userMoveInProgress()) {
+      for (const auto &[w, state] : m_states) {
+        setHovered(w, false);
+      }
+      return;
+    }
 
     // The menu of a thumbnail belongs to that thumbnail. It is a popup, so it
     // takes the pointer and is cut out of the hit region, and the thumbnail
