@@ -81,21 +81,6 @@ static QRectF grownRect(const QRectF &rect, const QRectF &natural, const QRectF 
     return grown;
 }
 
-/*! Returns the value an animation at \a progress towards \a to must start at to be at \a current. */
-static qreal rebased(qreal current, qreal to, qreal progress)
-{
-    return (current - to * progress) / (1.0 - progress);
-}
-
-/*! Returns the rectangle version of rebased(), applied corner by corner. */
-static QRectF rebasedRect(const QRectF &current, const QRectF &to, qreal progress)
-{
-    return QRectF(rebased(current.x(), to.x(), progress),
-                  rebased(current.y(), to.y(), progress),
-                  rebased(current.width(), to.width(), progress),
-                  rebased(current.height(), to.height(), progress));
-}
-
 /*!
  * Returns how much larger than its resting rectangle \a current is drawn.
  *
@@ -689,43 +674,35 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
         state.from = state.current = state.to = QRectF(w->frameGeometry());
         state.fromOpacity = state.currentOpacity = state.toOpacity = 1.0;
         state.fromCaption = state.currentCaption = state.toCaption = 0.0;
-        state.timeline.setEasingCurve(QEasingCurve::InOutCubic);
     } else if (sameRect(state.to, target) && qFuzzyCompare(state.toOpacity, targetOpacity)
                && qFuzzyCompare(state.toCaption, targetCaption)) {
         return;
     }
 
-    // A target that keeps moving (a window being dragged over the thumbnail)
-    // retargets the animation on every frame. Restarting it each time would
-    // leave the thumbnail forever at the slow start of the easing curve, which
-    // looks like it is stuck, so a running animation only gets the new
-    // destination: it keeps the point it set off from and the time it has
-    // already spent, and still arrives one animation duration after it left.
+    // Every retarget starts a whole new trip, from where the thumbnail is right
+    // now and lasting a full animation duration. Keeping the old start and the
+    // elapsed time instead would make a change of destination land the thumbnail
+    // somewhere it never was (a hover reversed halfway jumps straight to the
+    // resting rectangle) and leave it whatever is left of the duration to get
+    // there, so a reversal late in the animation would be over in a couple of
+    // frames.
+    //
+    // What must not come back with the restart is the slow start of the easing
+    // curve: a target that keeps moving (a window being dragged over the
+    // thumbnail) retargets on every frame, and easing in from a standstill each
+    // time leaves the thumbnail crawling behind it. A thumbnail that is already
+    // in motion therefore switches to a curve that starts at full speed and only
+    // eases out, which picks up where the previous trip left off closely enough
+    // for the eye and follows a moving target frame by frame.
     state.to = target;
     state.toOpacity = targetOpacity;
     state.toCaption = targetCaption;
-    // The start of the animation moves with the destination, though: the frame
-    // on screen has to come out of the interpolation unchanged, or the thumbnail
-    // jumps the moment the target changes. A hover reversed halfway would
-    // otherwise land straight on the resting rectangle, that being where the old
-    // start and the new destination nearly meet, and only the last of the way
-    // would be animated at all. Right at the end of the timeline there is no such
-    // start to be had (the division below goes to infinity), so those last few
-    // milliseconds take the restart path instead, where the jump is too small to
-    // see anyway.
-    const qreal progress = state.timeline.value();
-    if (!inserted && !state.timeline.done() && progress < 0.99) {
-        state.from = rebasedRect(state.current, state.to, progress);
-        state.fromOpacity = rebased(state.currentOpacity, state.toOpacity, progress);
-        state.fromCaption = rebased(state.currentCaption, state.toCaption, progress);
-        m_animating = true;
-        effects->addRepaintFull();
-        return;
-    }
 
     state.from = state.current;
     state.fromOpacity = state.currentOpacity;
     state.fromCaption = state.currentCaption;
+    state.timeline.setEasingCurve((inserted || state.timeline.done()) ? QEasingCurve::InOutCubic
+                                                                     : QEasingCurve::OutCubic);
     state.timeline.setDuration(m_animationDuration);
     state.timeline.reset();
 
