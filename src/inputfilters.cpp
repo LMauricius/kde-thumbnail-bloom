@@ -30,7 +30,7 @@ void ShieldFilter::setState(
     m_thumbnails = thumbnails;
 }
 
-Window *ShieldFilter::hitWindow(const QPointF &pos, const Window *stopAt) const
+ShieldFilter::Hit ShieldFilter::hitAt(const QPointF &pos, const Window *stopAt) const
 {
     // The same walk InputRedirection::findToplevel() does, minus what must not
     // answer here: the bloomed windows, which are not painted where they are,
@@ -38,14 +38,19 @@ Window *ShieldFilter::hitWindow(const QPointF &pos, const Window *stopAt) const
     // targets. KWin's other internal surfaces are cut out of the shields long
     // before this, so skipping all of them takes nothing away.
     //
-    // \a stopAt ends the walk empty-handed, and it does so before the skips: a
-    // minimized or bloomed stop window must still stop the walk, so that only
-    // what is genuinely stacked above it can answer.
+    // Both questions the filter has come out of this one walk: which window the
+    // input really belongs to, and whether that window is stacked above \a
+    // stopAt. \a stopAt is looked for before the skips, since a minimized or
+    // bloomed one still holds its place in the stack and only what is genuinely
+    // above it may count as being above it.
+    Hit hit;
+    bool aboveStop = stopAt != nullptr;
+
     const QList<Window *> &stacking = workspace()->stackingOrder();
     for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
         Window *window = *it;
         if (window == stopAt) {
-            return nullptr;
+            aboveStop = false;
         }
         if (window->isDeleted() || window->isMinimized() || window->isHidden()
             || window->isHiddenByShowDesktop()) {
@@ -59,20 +64,20 @@ Window *ShieldFilter::hitWindow(const QPointF &pos, const Window *stopAt) const
             continue;
         }
         if (window->hitTest(pos)) {
-            return window;
+            hit.window = window;
+            hit.aboveStop = aboveStop;
+            return hit;
         }
     }
 
-    return nullptr;
+    return hit;
 }
-
-Window *ShieldFilter::windowBelow(const QPointF &pos) const { return hitWindow(pos, nullptr); }
 
 bool ShieldFilter::isCovered(Window *window, const QPointF &pos) const
 {
     // Whatever answers the hit test before the bloomed window is reached is
     // stacked above it, and so is painted over its thumbnail.
-    return window && hitWindow(pos, window) != nullptr;
+    return window && hitAt(pos, window).aboveStop;
 }
 
 const ShieldFilter::Thumbnail *ShieldFilter::thumbnailAt(const QPointF &pos) const
@@ -100,8 +105,14 @@ void ShieldFilter::redirect(InputDeviceHandler *device, const QPointF &pos)
     if (!focus || !focus->isInternal()) {
         return;
     }
+
+    // One walk of the stack answers both halves, which matters on a path every
+    // pointer motion takes: what is really under the pointer, and whether it is
+    // stacked above the thumbnail the click target belongs to, which is what
+    // makes that thumbnail invisible here.
     const Thumbnail *thumbnail = thumbnailAt(pos);
-    const bool covered = thumbnail && isCovered(thumbnail->window, pos);
+    const Hit hit = hitAt(pos, thumbnail ? thumbnail->window : nullptr);
+    const bool covered = thumbnail && hit.aboveStop;
     if (!m_shields.contains(pos.toPoint()) && !covered) {
         return;
     }
@@ -109,7 +120,7 @@ void ShieldFilter::redirect(InputDeviceHandler *device, const QPointF &pos)
     // The split KWin makes in updateDecoration() and updateFocus(): outside the
     // client area the decoration takes the event and the window itself is not
     // focused at all, which is what makes the resize borders work.
-    Window *below = windowBelow(pos);
+    Window *below = hit.window;
     Decoration::DecoratedWindowImpl *decoration = nullptr;
     if (below && below->decoratedWindow() && !below->clientGeometry().contains(pos)) {
         decoration = below->decoratedWindow();

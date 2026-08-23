@@ -14,6 +14,7 @@
 #include <effect/timeline.h>
 
 #include <QHash>
+#include <QPointer>
 #include <QRegion>
 #include <QRectF>
 #include <QTimer>
@@ -22,6 +23,9 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
+
+class QWindow;
 
 namespace ThumbnailBloom {
 
@@ -96,6 +100,7 @@ private:
     {
         QRectF base; //!< rectangle the layout asked for, before any hover growth
         Animated<QRectF> rect; //!< rectangle the thumbnail is painted in
+        QRectF painted; //!< screen area the last frame drew the thumbnail into
         Animated<qreal> opacity; //!< thumbnail opacity, 1.0 when hovered or at home
         Animated<qreal> caption; //!< caption opacity the click target paints with
         Animated<qreal> bend; //!< bend strength, 0 flat, 1 full angle
@@ -106,6 +111,8 @@ private:
             hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay;
+        QPointer<KWin::EffectWindow>
+            overlayWindow; //!< the click target as the scene knows it, while it is shown
         std::unique_ptr<OverlayWindow>
             shield; //!< swallows the input the vacated real geometry would still get
     };
@@ -115,10 +122,11 @@ private:
     /*! Rebuilds the layout of every screen and retargets the animations. */
     void relayout();
     /*!
-     * Returns every window a relevant window is transient for, which is what
+     * Returns every window one of \a relevant is transient for, which is what
      * the "skip parents" setting works on.
      */
-    QSet<KWin::EffectWindow *> transientParents() const;
+    QSet<KWin::EffectWindow *> transientParents(
+        const std::vector<KWin::EffectWindow *> &relevant) const;
     /*!
      * Retargets every placed window towards its thumbnail, sends the rest of
      * the bloomed ones home, and refreshes the shields and the hover, in that
@@ -171,8 +179,18 @@ private:
      * rectangle for the outline (drawOutline()); the direction is taken from the
      * on-screen rectangle either way, so the two cannot drift apart.
      */
-    QTransform stateBend(
-        KWin::EffectWindow *w, const BloomState &state, const QRectF &rect) const;
+    QTransform stateBend(KWin::EffectWindow *w, const BloomState &state, const QRectF &rect) const;
+    /*!
+     * Returns everything the thumbnail of \a w puts on the screen as \a state
+     * stands, which is the area a repaint has to cover for it to come out whole.
+     *
+     * Larger than the rectangle the layout works with on two counts: the window
+     * is drawn with its shadow, which reaches outside its frame, and the bend
+     * carries that shadow through the very projective map the pixels go through,
+     * which can take a corner outside the frame further out still. Padding the
+     * plain rectangle would not do; the map has to be applied.
+     */
+    QRectF paintedArea(KWin::EffectWindow *w, const BloomState &state) const;
     /*! Applies the thumbnail transformation of \a state to \a data. */
     void applyTransform(
         KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
@@ -195,10 +213,11 @@ private:
      *
      * The whole \a state is taken rather than a rectangle, because the outline
      * is turned by the same bend as the pixels of the thumbnail and needs the
-     * strength this frame is drawn with.
+     * strength this frame is drawn with. \a color is read once for the whole
+     * set of them, a palette being too much to build per outline.
      */
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
-        KWin::EffectWindow *w, const BloomState &state) const;
+        KWin::EffectWindow *w, const BloomState &state, const QColor &color) const;
     /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
     /*!
@@ -225,8 +244,12 @@ private:
     bool isRelevant(KWin::EffectWindow *w) const;
     /*! Whether the settings exempt \a w from the effect, so that it neither blooms nor makes others bloom. */
     bool isIgnored(KWin::EffectWindow *w, const QSet<KWin::EffectWindow *> &parents) const;
-    /*! Whether \a w may be turned into a thumbnail, honouring the settings. */
-    bool isEligible(KWin::EffectWindow *w, const QSet<KWin::EffectWindow *> &parents) const;
+    /*!
+     * Whether \a w may be turned into a thumbnail, \a ignored saying whether the
+     * settings exempt it. That half is worked out by the caller, which needs the
+     * answer for itself anyway.
+     */
+    bool isEligible(KWin::EffectWindow *w, bool ignored) const;
     /*! Whether \a w covers its whole maximize area (fullscreen counts as maximized). */
     bool isMaximized(KWin::EffectWindow *w) const;
     /*! Whether \a w is one of the effect's own click targets or shields. */
@@ -242,6 +265,10 @@ private:
     void watch(KWin::EffectWindow *w);
 
     std::unordered_map<KWin::EffectWindow *, BloomState> m_states;
+    //! Every surface of the effect's own: the click targets and the shields.
+    std::unordered_set<const QWindow *> m_ownOverlays;
+    //! The click targets alone, the surfaces the captions are painted on.
+    std::unordered_set<const QWindow *> m_captionTargets;
     QTimer m_relayoutTimer;
     std::chrono::milliseconds m_animationDuration { 250 };
     bool m_showIcons = true;
@@ -254,6 +281,7 @@ private:
     ShieldFilter m_shieldFilter;
     TouchDragFilter m_touchDragFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints
+    QRegion m_dirty; //!< logical area the running animations have to repaint
     KWin::EffectWindow *m_menuOwner
         = nullptr; //!< window whose menu is open, kept focused meanwhile
     KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing

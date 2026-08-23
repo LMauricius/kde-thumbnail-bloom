@@ -13,6 +13,8 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
+#include <QScreen>
 #include <QStyleHints>
 #include <QTouchEvent>
 #include <QWheelEvent>
@@ -171,40 +173,62 @@ static void paintShadow(QPainter &painter, const QRectF &rect, qreal dpr, const 
 }
 
 /*!
- * Draws \a icon and \a title with \a painter, along the bottom of \a area.
+ * How far past its shape a shadow of \a shadowRadius reaches, in logical pixels.
+ *
+ * paintShadow() pads its buffer by the whole reach of the kernel and stamps the
+ * result a little below the shape, so the ink of a caption can be this far
+ * outside the icon and the plate on any side.
+ */
+static qreal shadowReach(qreal shadowRadius, qreal dpr)
+{
+    return 3.0 * boxRadius(shadowRadius * dpr) / dpr + captionShadowDrop;
+}
+
+/*!
+ * Everything drawing a caption needs worked out ahead of the drawing: where the
+ * two parts go, what is left of the title, and the strip of the window the
+ * result occupies. An empty band means there is nothing to draw at all.
+ */
+struct CaptionLayout
+{
+    QRectF iconRect; //!< where the icon goes, empty when there is none
+    QRectF plateRect; //!< where the plate behind the title goes, empty when there is none
+    QString text; //!< the title, elided to what the plate holds
+    QFont font; //!< the font the title was measured with
+    QRectF band; //!< everything the caption paints into, the shadows included
+};
+
+/*!
+ * Lays out a caption of \a icon and \a title along the bottom of \a area.
  *
  * The icon sits to the left of the title, and only the title gets a plate
- * behind it, black or white depending on which one the text colour can be read
- * against. Both carry a shadow: the title one in the colour of its own plate,
- * the icon always a black one, since an icon brings its own colours and has to
- * stay legible over a light background whatever the colour scheme is. Nothing
- * is drawn at all when the area is too small to hold the result.
+ * behind it. Nothing is laid out at all when the area is too small to hold the
+ * result.
  */
-static void paintCaption(
-    QPainter &painter, const QRectF &area, const QIcon &icon, const QString &title, qreal dpr)
+static CaptionLayout captionLayout(
+    const QRectF &area, const QIcon &icon, const QString &title, qreal dpr)
 {
+    CaptionLayout layout;
+
     const QRectF inner
         = area.adjusted(captionMargin, captionMargin, -captionMargin, -captionMargin);
     if (inner.isEmpty()) {
-        return;
+        return layout;
     }
 
-    const QFont font = QGuiApplication::font();
-    const QFontMetricsF metrics(font);
-    const QColor textColor = captionTextColor();
-    const QColor plateColor = captionPlateColor(textColor);
+    layout.font = QGuiApplication::font();
+    const QFontMetricsF metrics(layout.font);
 
     // Both parts are optional, and either one missing simply takes its band out.
     const bool hasIcon = !icon.isNull() && captionIconSize <= inner.width();
     const qreal iconBand = hasIcon ? captionIconSize + captionIconGap : 0.0;
 
-    QString text;
     qreal plateWidth = 0.0;
     qreal plateHeight = 0.0;
     if (!title.isEmpty() && inner.width() - iconBand > 2 * captionPaddingX) {
         const qreal textBudget = inner.width() - iconBand - 2 * captionPaddingX;
-        text = metrics.elidedText(title, Qt::ElideRight, textBudget);
-        plateWidth = std::min(metrics.horizontalAdvance(text) + 2 * captionPaddingX,
+        layout.text = metrics.elidedText(title, Qt::ElideRight, textBudget);
+        plateWidth = std::min(metrics.horizontalAdvance(layout.text) + 2 * captionPaddingX,
             textBudget + 2 * captionPaddingX);
         plateHeight = metrics.height() + 2 * captionPaddingY;
     }
@@ -214,30 +238,62 @@ static void paintCaption(
         + (hasIcon && plateWidth > 0 ? captionIconGap : 0.0) + plateWidth;
     const qreal height = std::max(hasIcon ? captionIconSize : 0.0, plateHeight);
     if (width <= 0 || height <= 0 || height > inner.height() || width > inner.width()) {
-        return;
+        return CaptionLayout();
     }
 
     const qreal left = inner.center().x() - width / 2;
     const qreal middle = inner.bottom() - height / 2;
 
+    // The band is the union of the two parts, each grown by the reach of its own
+    // shadow. It is built part by part rather than with QRectF::united(), which
+    // would drag the origin in for a caption that has only one of them.
     if (hasIcon) {
-        const QRectF iconRect(left, middle - captionIconSize / 2, captionIconSize, captionIconSize);
+        layout.iconRect
+            = QRectF(left, middle - captionIconSize / 2, captionIconSize, captionIconSize);
+        const qreal reach = shadowReach(iconShadowRadius, dpr);
+        layout.band = layout.iconRect.adjusted(-reach, -reach, reach, reach);
+    }
+    if (plateHeight > 0) {
+        layout.plateRect = QRectF(
+            left + (hasIcon ? iconBand : 0.0), middle - plateHeight / 2, plateWidth, plateHeight);
+        const qreal reach = shadowReach(captionShadowRadius, dpr);
+        const QRectF plateBand = layout.plateRect.adjusted(-reach, -reach, reach, reach);
+        layout.band = layout.band.isEmpty() ? plateBand : layout.band.united(plateBand);
+    }
 
+    return layout;
+}
+
+/*!
+ * Draws the caption \a layout describes with \a painter, at \a dpr device
+ * pixels per logical one.
+ *
+ * The plate is black or white depending on which one the text colour can be
+ * read against. Both parts carry a shadow: the title one in the colour of its
+ * own plate, the icon always a black one, since an icon brings its own colours
+ * and has to stay legible over a light background whatever the colour scheme is.
+ */
+static void paintCaption(
+    QPainter &painter, const CaptionLayout &layout, const QIcon &icon, qreal dpr)
+{
+    const QColor textColor = captionTextColor();
+    const QColor plateColor = captionPlateColor(textColor);
+
+    if (!layout.iconRect.isEmpty()) {
         // An icon brings its own colours and has to stay legible over a light
         // background whatever the colour scheme is, so its shadow is black.
         QColor shadowColor(Qt::black);
         shadowColor.setAlphaF(captionShadowAlpha);
-        paintShadow(
-            painter, iconRect, dpr, shadowColor, iconShadowRadius, [&icon](QPainter &shapePainter) {
+        paintShadow(painter, layout.iconRect, dpr, shadowColor, iconShadowRadius,
+            [&icon](QPainter &shapePainter) {
                 icon.paint(&shapePainter, QRect(0, 0, int(captionIconSize), int(captionIconSize)));
             });
 
-        icon.paint(&painter, iconRect.toRect());
+        icon.paint(&painter, layout.iconRect.toRect());
     }
 
-    if (plateHeight > 0) {
-        const QRectF plate(
-            left + (hasIcon ? iconBand : 0.0), middle - plateHeight / 2, plateWidth, plateHeight);
+    if (!layout.plateRect.isEmpty()) {
+        const QRectF plate = layout.plateRect;
 
         QColor filled = plateColor;
         filled.setAlphaF(captionPlateAlpha);
@@ -251,14 +307,14 @@ static void paintCaption(
         shadowColor.setAlphaF(captionShadowAlpha);
         const QRectF local(0, 0, plate.width(), plate.height());
         paintShadow(painter, plate, dpr, shadowColor, captionShadowRadius,
-            [&font, &text, local](QPainter &shapePainter) {
-                shapePainter.setFont(font);
-                shapePainter.drawText(local, Qt::AlignCenter, text);
+            [&layout, local](QPainter &shapePainter) {
+                shapePainter.setFont(layout.font);
+                shapePainter.drawText(local, Qt::AlignCenter, layout.text);
             });
 
         painter.setPen(textColor);
-        painter.setFont(font);
-        painter.drawText(plate, Qt::AlignCenter, text);
+        painter.setFont(layout.font);
+        painter.drawText(plate, Qt::AlignCenter, layout.text);
     }
 }
 
@@ -342,6 +398,11 @@ ThumbnailOverlay::ThumbnailOverlay()
             Q_EMIT menuRequested(m_touchOrigin);
         }
     });
+
+    // The rendered caption holds the colours of the scheme and the size of the
+    // pixels it was made at, so both have to drop it.
+    connect(this, &QWindow::screenChanged, this, [this](QScreen *) { invalidateCaption(); });
+    qApp->installEventFilter(this);
 }
 
 ThumbnailOverlay::~ThumbnailOverlay() = default;
@@ -354,9 +415,7 @@ void ThumbnailOverlay::setCaption(const QIcon &icon, const QString &title)
 
     m_icon = icon;
     m_title = title;
-    if (m_captionOpacity > 0) {
-        update();
-    }
+    invalidateCaption();
 }
 
 void ThumbnailOverlay::setCaptionOpacity(qreal opacity)
@@ -369,29 +428,124 @@ void ThumbnailOverlay::setCaptionOpacity(qreal opacity)
     }
 
     m_captionOpacity = opacity;
-    update();
+
+    // Only the strip the caption is drawn in has to be repainted, which is what
+    // keeps a fade from redrawing and re-uploading the whole thumbnail sized
+    // window every frame. A caption that has not been laid out yet may land
+    // anywhere, so that one still takes the window as a whole; one that will
+    // draw nothing at all needs no repaint whatsoever.
+    if (m_captionDirty) {
+        if (!m_icon.isNull() || !m_title.isEmpty()) {
+            update();
+        }
+    } else if (!m_captionBand.isEmpty()) {
+        update(m_captionBand.toAlignedRect());
+    }
+}
+
+void ThumbnailOverlay::invalidateCaption()
+{
+    m_captionDirty = true;
+
+    // The band the old caption occupied has to be cleared even when the new one
+    // turns out to be smaller, so this repaints everything.
+    if (m_captionOpacity > 0) {
+        update();
+    }
+}
+
+void ThumbnailOverlay::renderCaption()
+{
+    if (!m_captionDirty) {
+        return;
+    }
+
+    m_captionDirty = false;
+    m_captionImage = QImage();
+    m_captionBand = QRectF();
+
+    if (m_icon.isNull() && m_title.isEmpty()) {
+        return;
+    }
+
+    const qreal dpr = devicePixelRatio();
+    const CaptionLayout layout = captionLayout(QRectF(QPointF(0, 0), size()), m_icon, m_title, dpr);
+    if (layout.band.isEmpty()) {
+        return;
+    }
+
+    // Blurring the two shadows by hand costs far too much to repeat on every
+    // frame of a fade, so the caption is drawn once into an image of its own and
+    // only stamped from there on. The image covers the whole band, the shadows
+    // included; the fade is then a matter of the opacity it is stamped with.
+    //
+    // The band is squared up on the grid of the device rather than on the one of
+    // the logical pixels, and the image is placed back on it by that same grid:
+    // on a screen scaled by anything but a whole number the two do not line up,
+    // and stamping the image at a fraction of a device pixel would have QPainter
+    // resample it, which would leave the caption softer than it was drawn.
+    const QRect device
+        = QRectF(layout.band.topLeft() * dpr, layout.band.size() * dpr).toAlignedRect();
+    m_captionBand = QRectF(QPointF(device.x() / dpr, device.y() / dpr),
+        QSizeF(device.width() / dpr, device.height() / dpr));
+
+    m_captionImage = QImage(device.size(), QImage::Format_ARGB32_Premultiplied);
+    m_captionImage.setDevicePixelRatio(dpr);
+    m_captionImage.fill(Qt::transparent);
+
+    QPainter painter(&m_captionImage);
+    painter.setRenderHints(
+        QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
+    painter.translate(-m_captionBand.topLeft());
+    paintCaption(painter, layout, m_icon, dpr);
+}
+
+void ThumbnailOverlay::resizeEvent(QResizeEvent *event)
+{
+    // The caption is laid out against the size of the window, and a resize
+    // repaints the whole of it anyway.
+    invalidateCaption();
+    OverlayWindow::resizeEvent(event);
+}
+
+bool ThumbnailOverlay::eventFilter(QObject *watched, QEvent *event)
+{
+    // In Qt 6 the palette change reaches the application object and nothing
+    // else, so that is where a colour scheme change has to be picked up from.
+    if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
+        invalidateCaption();
+    }
+
+    return OverlayWindow::eventFilter(watched, event);
 }
 
 void ThumbnailOverlay::paintEvent(QPaintEvent *event)
 {
-    Q_UNUSED(event)
+    renderCaption();
 
-    // The whole window is cleared, not just the exposed part: the backing store
-    // keeps what was drawn last time, so clearing less would leave the previous
-    // caption underneath the new one and blend the two together.
+    // Source mode clears instead of blending: the backing store keeps what was
+    // drawn last time, and blending the new caption over the old one would
+    // double it. Only what the repaint asked for is cleared, which is what lets
+    // a fade repaint the caption band alone; nothing is ever drawn outside that
+    // band, so the rest of the window still holds the pixels a full paint
+    // cleared, and invalidateCaption() repaints everything whenever the band
+    // itself can have moved.
     QPainter painter(this);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
-    painter.fillRect(QRect(QPoint(0, 0), size()), Qt::transparent);
+    for (const QRect &rect : event->region()) {
+        painter.fillRect(rect, Qt::transparent);
+    }
 
-    if (m_captionOpacity <= 0 || (m_icon.isNull() && m_title.isEmpty())) {
+    if (m_captionOpacity <= 0 || m_captionImage.isNull()) {
         return;
     }
 
+    // All that is left of the drawing: the caption was rendered once, shadows
+    // and all, and the fade is the opacity it is stamped at.
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    painter.setRenderHints(
-        QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
+    painter.setClipRegion(event->region());
     painter.setOpacity(std::min(m_captionOpacity, 1.0));
-    paintCaption(painter, QRectF(QPointF(0, 0), size()), m_icon, m_title, devicePixelRatio());
+    painter.drawImage(m_captionBand.topLeft(), m_captionImage);
 }
 
 bool ThumbnailOverlay::isDrag(const QPointF &origin, const QPointF &pos)

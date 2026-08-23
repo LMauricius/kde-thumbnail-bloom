@@ -7,8 +7,10 @@
 #pragma once
 
 #include <QIcon>
+#include <QImage>
 #include <QPointF>
 #include <QRasterWindow>
+#include <QRectF>
 #include <QString>
 #include <QTimer>
 
@@ -109,7 +111,9 @@ Q_SIGNALS:
 
 protected:
     bool event(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -119,10 +123,24 @@ private:
     static bool isDrag(const QPointF &origin, const QPointF &pos);
     /*! Ends the tracked touch sequence: no tap or long press can come of it any more. */
     void resetTouch();
+    /*!
+     * Draws the caption into m_captionImage, unless that one is still good.
+     *
+     * The two shadows are blurred on the processor, which is far too much work
+     * to repeat on every frame of a fade, so the result is kept and only
+     * stamped from then on.
+     */
+    void renderCaption();
+    /*! Drops the rendered caption and repaints, so that the next paint makes it again. */
+    void invalidateCaption();
 
     QIcon m_icon;
     QString m_title;
     qreal m_captionOpacity = 0.0;
+
+    QImage m_captionImage; //!< the caption as drawn, in device pixels, or null for none
+    QRectF m_captionBand; //!< where in the window the image goes, the shadows included
+    bool m_captionDirty = true; //!< whether the image still matches the caption and the window
 
     QPointF m_pressOrigin; //!< where the left button went down
     bool m_pressed = false; //!< whether a left press is still undecided

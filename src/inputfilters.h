@@ -80,14 +80,20 @@ private:
      * InputDeviceHandlers and both are pointed at a shield the same way.
      */
     void redirect(KWin::InputDeviceHandler *device, const QPointF &pos);
+
+    /*! What one walk of the stacking order finds at a point. */
+    struct Hit
+    {
+        KWin::Window *window = nullptr; //!< the window the input belongs to, if any
+        bool aboveStop = false; //!< whether it was found before the walk reached the stop window
+    };
+
     /*!
      * Returns the topmost window at \a pos that is neither bloomed nor one of
-     * ours, walking the stacking order with KWin's own hit test. The walk stops
-     * empty-handed when it reaches \a stopAt.
+     * ours, walking the stacking order with KWin's own hit test, and whether it
+     * is stacked above \a stopAt (never, when that is null).
      */
-    KWin::Window *hitWindow(const QPointF &pos, const KWin::Window *stopAt) const;
-    /*! Returns the topmost window at \a pos that is neither bloomed nor one of ours. */
-    KWin::Window *windowBelow(const QPointF &pos) const;
+    Hit hitAt(const QPointF &pos, const KWin::Window *stopAt) const;
     /*! Returns the thumbnail whose click target holds \a pos, if there is one. */
     const Thumbnail *thumbnailAt(const QPointF &pos) const;
     /*! Whether a thumbnail holds \a pos and is visible there, so that it can act. */
