@@ -99,6 +99,7 @@ private:
     struct BloomState
     {
         QRectF base; //!< rectangle the layout asked for, before any hover growth
+        QRectF thumbBase; //!< resting rectangle of the last thumbnail, kept on the way home
         Animated<QRectF> rect; //!< rectangle the thumbnail is painted in
         QRectF painted; //!< screen area the last frame drew the thumbnail into
         Animated<qreal> opacity; //!< thumbnail opacity, 1.0 when hovered or at home

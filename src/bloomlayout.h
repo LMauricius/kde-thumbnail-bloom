@@ -61,11 +61,21 @@ struct Placement
  * the LayoutWindow::ignored ones, which the settings keep out of the effect
  * altogether rather than letting them push others aside.
  *
- * The thumbnail is then shrunk to LayoutOptions::initialScale and put in the
- * free space nearest to where the window sits; if nothing fits, it keeps
- * shrinking down to LayoutOptions::minScale. Every window that is staying put
- * is kept clear, wherever it sits in the stack, so a thumbnail never lands on
- * a window that was visible without it.
+ * Placement then runs twice. The sizing pass lays the thumbnails out packed
+ * into the corners of the free space, which keeps what is left of it in one
+ * block and so measures honestly how much room the screen has; a thumbnail that
+ * finds no room at all counts as LayoutOptions::minScale. Its rectangles are
+ * discarded and only the average size is kept. The placement pass then starts
+ * every thumbnail a third of the way from LayoutOptions::initialScale towards
+ * that average and puts it in the free space nearest to where its window sits,
+ * shrinking down to LayoutOptions::minScale when nothing fits. Asking for less
+ * up front on a crowded screen is what leaves the thumbnails further down the
+ * stack with more than the scraps.
+ *
+ * Both passes walk the stack from the top down, so the thumbnails nearer the
+ * top get the pick of the free space. Every window that is staying put is kept
+ * clear, wherever it sits in the stack, so a thumbnail never lands on a window
+ * that was visible without it.
  *
  * Returns one Placement per bloomed window; windows that stay untouched and
  * windows the smallest thumbnail still finds no room for are absent from the

@@ -97,6 +97,111 @@ static std::optional<QRect> nearestFreeSlot(
     return best;
 }
 
+/*!
+ * Squared distance from \a rect's centre to the nearest corner of \a area.
+ * Only ever compared against another such value, so the square root is spared.
+ */
+static qreal cornerDistanceSquared(const QRect &area, const QRect &rect)
+{
+    const QPointF center = rect.center();
+    const QPointF corners[]
+        = { area.topLeft(), area.topRight(), area.bottomLeft(), area.bottomRight() };
+
+    qreal best = distanceSquared(center, corners[0]);
+    for (const QPointF &corner : corners) {
+        best = std::min(best, distanceSquared(center, corner));
+    }
+    return best;
+}
+
+/*!
+ * Places a \a size sized rectangle in whichever corner of the free space in
+ * \a free lies closest to a corner of \a area. Returns nothing when \a size
+ * fits nowhere.
+ *
+ * This is the packing counterpart of nearestFreeSlot(): it ignores where the
+ * window actually is and pushes the rectangle into a corner, so that what is
+ * left over stays one large block in the middle rather than a set of gaps too
+ * small for anybody.
+ */
+static std::optional<QRect> packedFreeSlot(
+    const QRegion &free, const QSize &size, const QRect &area)
+{
+    std::optional<QRect> best;
+    qreal bestDistance = 0;
+
+    // Every free band contributes its own four corners; the winner is the
+    // corner that ends up nearest to a corner of the work area.
+    for (const QRect &band : free) {
+        if (band.width() < size.width() || band.height() < size.height()) {
+            continue;
+        }
+
+        const int lefts[] = { band.left(), band.right() + 1 - size.width() };
+        const int tops[] = { band.top(), band.bottom() + 1 - size.height() };
+        for (const int left : lefts) {
+            for (const int top : tops) {
+                const QRect candidate(left, top, size.width(), size.height());
+
+                // Bands are only single rows of the region, so a candidate that
+                // sticks out vertically into a neighbouring band still has to be
+                // checked.
+                if (!fitsInside(free, candidate)) {
+                    continue;
+                }
+
+                const qreal distance = cornerDistanceSquared(area, candidate);
+                if (!best || distance < bestDistance) {
+                    best = candidate;
+                    bestDistance = distance;
+                }
+            }
+        }
+    }
+
+    return best;
+}
+
+/*! A thumbnail rectangle together with the scale it was found at. */
+struct SizedSlot
+{
+    QRect rect;
+    qreal scale = 0;
+};
+
+/*!
+ * Shrinks a thumbnail of \a geometry from \a startScale down to
+ * LayoutOptions::minScale until one of the sizes finds a slot in \a free.
+ *
+ * \a packed picks the strategy: packedFreeSlot() into a corner of \a area, or
+ * nearestFreeSlot() to where the window sits. Returns nothing when not even
+ * the smallest size fits anywhere.
+ */
+static std::optional<SizedSlot> searchSlot(const QRegion &free, const QRectF &geometry,
+    const QRect &area, qreal startScale, const LayoutOptions &options, bool packed)
+{
+    // Shrink first, move second: try the starting size and only shrink further
+    // when that size finds no free spot. The loop always ends on minScale
+    // rather than on whatever the steps happen to land on, since startScale is
+    // no multiple of scaleStep and the smallest size must never be skipped.
+    qreal scale = std::max(options.minScale, startScale);
+    while (true) {
+        const QSize size(std::max(1, int(std::lround(geometry.width() * scale))),
+            std::max(1, int(std::lround(geometry.height() * scale))));
+        const std::optional<QRect> slot = packed
+            ? packedFreeSlot(free, size, area)
+            : nearestFreeSlot(free, size, geometry.center());
+        if (slot) {
+            return SizedSlot { *slot, scale };
+        }
+
+        if (scale <= options.minScale + 0.001) {
+            return {};
+        }
+        scale = std::max(options.minScale, scale - options.scaleStep);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Selection pass
 // ---------------------------------------------------------------------------
@@ -168,62 +273,113 @@ static std::vector<bool> selectBloomed(
 // Layout pass
 // ---------------------------------------------------------------------------
 
-QList<Placement> computeLayout(
-    const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
-{
-    const QRect area = workArea.toAlignedRect();
-    const std::vector<bool> bloomed = selectBloomed(stack, options);
-    QList<Placement> placements;
+/*!
+ * How far the placement pass moves its starting size away from the configured
+ * thumbnail size, towards the average size the sizing pass could actually
+ * afford. Zero would keep the old greedy behaviour; one would hand every
+ * thumbnail the average outright.
+ */
+static constexpr qreal AverageBlend = 0.33;
 
-    // Everything a thumbnail may not be placed on: every window that stays put,
-    // plus the thumbnails already handed out. Stacking has no say in the first
-    // half, so it is seeded whole before the walk: a thumbnail dropped on a
-    // window below it in the stack would still be covering that window.
+/*!
+ * Everything a thumbnail may not be placed on before any of them are handed
+ * out: every window of \a stack that is staying put, grown by the margin.
+ *
+ * Stacking has no say here, so the whole set is collected up front: a thumbnail
+ * dropped on a window below it in the stack would still be covering that window.
+ */
+static QRegion blockedSeed(const QList<LayoutWindow> &stack, const std::vector<bool> &bloomed,
+    const LayoutOptions &options)
+{
     QRegion blocked;
     for (int i = 0; i < stack.size(); ++i) {
         if (!bloomed[i]) {
             blocked += grown(stack[i].geometry.toAlignedRect(), options.margin);
         }
     }
+    return blocked;
+}
 
-    // Walk from the top of the stack downwards, so that the thumbnails nearer
-    // the top get the pick of the free space.
+/*!
+ * Hands every bloomed window of \a stack a rectangle, walking from the top of
+ * the stack downwards so that the thumbnails nearer the top get the pick of the
+ * free space and each one is placed against the final rectangles of those above
+ * it.
+ *
+ * \a startScale is the size every thumbnail is tried at first, \a packed picks
+ * the slot strategy (see searchSlot()). \a averageScale, when given, receives
+ * the mean of the scales the thumbnails ended up at, counting one that found no
+ * room at all as LayoutOptions::minScale.
+ */
+static QList<Placement> runPass(const QList<LayoutWindow> &stack, const std::vector<bool> &bloomed,
+    const QRegion &seed, const QRect &area, const LayoutOptions &options, qreal startScale,
+    bool packed, qreal *averageScale = nullptr)
+{
+    QRegion blocked = seed;
+    QList<Placement> placements;
+    qreal scaleSum = 0;
+    int count = 0;
+
     for (int i = stack.size() - 1; i >= 0; --i) {
         if (!bloomed[i]) {
             continue;
         }
         const LayoutWindow &window = stack[i];
         const QRect geometry = window.geometry.toAlignedRect();
+        ++count;
 
-        // Shrink first, move second: try the configured thumbnail size and only
-        // shrink further when that size finds no free spot.
         const QRegion free = QRegion(area).subtracted(blocked);
-        const QPointF desiredCenter = window.geometry.center();
-        std::optional<QRect> slot;
-
-        for (qreal scale = options.initialScale; scale >= options.minScale - 0.001;
-            scale -= options.scaleStep) {
-            const QSize size(std::max(1, int(std::lround(window.geometry.width() * scale))),
-                std::max(1, int(std::lround(window.geometry.height() * scale))));
-            slot = nearestFreeSlot(free, size, desiredCenter);
-            if (slot) {
-                break;
-            }
-        }
+        const std::optional<SizedSlot> slot
+            = searchSlot(free, window.geometry, area, startScale, options, packed);
 
         // Not even the smallest thumbnail fits: leave the window alone rather
         // than drop it somewhere it would be in the way. It stays where it is
-        // and thus out of sight, under whatever covers it.
+        // and thus out of sight, under whatever covers it. It still counts
+        // towards the average, at the smallest size, since the space it wanted
+        // was not there.
         if (!slot) {
+            scaleSum += options.minScale;
             blocked += grown(geometry, options.margin);
             continue;
         }
 
-        placements.append(Placement { window.id, QRectF(*slot) });
-        blocked += grown(*slot, options.margin);
+        scaleSum += slot->scale;
+        placements.append(Placement { window.id, QRectF(slot->rect) });
+        blocked += grown(slot->rect, options.margin);
     }
 
+    if (averageScale) {
+        *averageScale = count > 0 ? scaleSum / count : options.initialScale;
+    }
     return placements;
+}
+
+QList<Placement> computeLayout(
+    const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
+{
+    const QRect area = workArea.toAlignedRect();
+    const std::vector<bool> bloomed = selectBloomed(stack, options);
+    const QRegion seed = blockedSeed(stack, bloomed, options);
+
+    // Sizing pass: the same walk, but packing every thumbnail into a corner
+    // instead of putting it where it looks best. That leaves the free space in
+    // one block rather than in scraps, so what the later thumbnails have to
+    // settle for is a fair measure of how much room this screen really has. The
+    // rectangles are thrown away; only the average size survives.
+    qreal averageScale = options.initialScale;
+    runPass(stack, bloomed, seed, area, options, options.initialScale, true, &averageScale);
+
+    // Every thumbnail now starts a third of the way from the configured size
+    // towards that average, so a crowded screen asks for less up front and the
+    // thumbnails further down the stack are no longer left with the scraps. A
+    // screen where everything fitted measures the configured size as its
+    // average and is laid out exactly as before.
+    const qreal startScale = std::max(options.minScale,
+        options.initialScale + AverageBlend * (averageScale - options.initialScale));
+
+    // Placement pass: the real one, each thumbnail as close to its window as
+    // the free space allows.
+    return runPass(stack, bloomed, seed, area, options, startScale, false);
 }
 
 } // namespace ThumbnailBloom

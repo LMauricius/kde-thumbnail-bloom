@@ -120,10 +120,14 @@ static QRectF grownRect(const QRectF &rect, const QRectF &natural, const QRectF 
 }
 
 /*!
- * Returns how much larger than its resting rectangle \a current is drawn.
+ * Returns how much larger than its resting thumbnail \a current is drawn.
  *
- * One while the thumbnail sits where the layout put it, more while the hover
- * has it grown; it is what orders the lifted thumbnails among themselves.
+ * One while the thumbnail sits where the layout put it, more while the hover has
+ * it grown, and more still while it travels back to the real window; it is what
+ * orders the lifted thumbnails among themselves. The reference is the resting
+ * thumbnail even then, never the window itself, so the trip home reads as a
+ * growth rather than as the shrink measuring against the real geometry makes of
+ * it.
  */
 static qreal growth(const QRectF &current, const QRectF &base)
 {
@@ -569,6 +573,13 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // ordinary window again, so it fades back to fully opaque just like the
     // hovered thumbnail does.
     const bool thumbnail = !sameRect(base, frameRect(w));
+    // The rectangle the lift measures against. It only ever follows a real
+    // thumbnail, so the window travelling home keeps the one it is leaving:
+    // measuring the trip against the real geometry would call it a shrink and
+    // drop the window behind the thumbnails it is growing past.
+    if (thumbnail || inserted) {
+        state.thumbBase = base;
+    }
     const QRectF target = state.hovered
         ? grownRect(base, frameRect(w), QRectF(effects->clientArea(MaximizeArea, w)))
         : base;
@@ -1301,18 +1312,30 @@ void ThumbnailBloomEffect::updateLift()
     // between the hover ending and the relayout that retargets the animation the
     // timeline is still the finished one of the way up.
     //
+    // The window on its way back to its real geometry is lifted by the same
+    // test: it is growing past its resting thumbnail, and its trip crosses the
+    // thumbnails it is leaving behind.
+    //
     // They are ordered by that same size, most enlarged last, so the thumbnails
-    // still on their way up cover the ones already on their way down.
+    // still on their way up cover the ones already on their way down. The active
+    // window comes last of all: while it is here it is the one that was just
+    // picked, travelling home, and nothing may be drawn over it. It is only ever
+    // in this set for the length of that trip, so this never lifts an ordinary
+    // focused window out of the stacking order.
+    EffectWindow *const active = effects->activeWindow();
     m_lifted.clear();
     for (const auto &[w, state] : m_states) {
-        if (state.hovered || growth(state.rect.current, state.base) > 1.0 + liftEpsilon) {
+        if (state.hovered || growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon) {
             m_lifted.push_back(w);
         }
     }
-    std::ranges::sort(m_lifted, [this](EffectWindow *a, EffectWindow *b) {
+    std::ranges::sort(m_lifted, [this, active](EffectWindow *a, EffectWindow *b) {
+        if (a == active || b == active) {
+            return b == active && a != active;
+        }
         const BloomState &sa = m_states.at(a);
         const BloomState &sb = m_states.at(b);
-        return growth(sa.rect.current, sa.base) < growth(sb.rect.current, sb.base);
+        return growth(sa.rect.current, sa.thumbBase) < growth(sb.rect.current, sb.thumbBase);
     });
 
     // The lifted thumbnails are drawn right after the topmost window that covers
