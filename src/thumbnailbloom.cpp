@@ -760,7 +760,8 @@ void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
 
 void ThumbnailBloomEffect::forget(EffectWindow *w)
 {
-    std::erase(m_lifted, w);
+    std::erase(m_liftedBelow.windows, w);
+    std::erase(m_liftedAbove.windows, w);
     if (m_menuOwner == w) {
         m_menuOwner = nullptr;
         m_menuPopup = nullptr;
@@ -1235,7 +1236,7 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
         // repaint per frame for as long as the pointer stays on it: nothing
         // changes on the screen then, so nothing has to be drawn until something
         // else damages it.
-        if (!m_lifted.empty() && data.screen) {
+        if ((!m_liftedBelow.windows.empty() || !m_liftedAbove.windows.empty()) && data.screen) {
             data.paint |= Region(data.screen->geometry());
         } else if (!m_dirty.isEmpty()) {
             // The animations only need the ground they are moving over. What is
@@ -1317,29 +1318,43 @@ void ThumbnailBloomEffect::updateLift()
     // thumbnails it is leaving behind.
     //
     // They are ordered by that same size, most enlarged last, so the thumbnails
-    // still on their way up cover the ones already on their way down. The active
-    // window comes last of all: while it is here it is the one that was just
-    // picked, travelling home, and nothing may be drawn over it. It is only ever
-    // in this set for the length of that trip, so this never lifts an ordinary
-    // focused window out of the stacking order.
+    // still on their way up cover the ones already on their way down.
+    //
+    // The set is then split in two, and only the hovered thumbnail may be drawn
+    // over the active window: that window is the one another effect is most
+    // likely to be animating (a minimise, a slide, a wobble), and a thumbnail
+    // stamped over it would be painted where that animation is. The pointer is
+    // the exception, because a thumbnail the user is working with has to be
+    // readable wherever it grows to.
+    //
+    // The active window itself goes with the hovered ones. While it is in this
+    // set at all it is the thumbnail that was just picked, travelling home, and
+    // nothing may be drawn over it; capping it under itself would mean nothing
+    // anyway. It sorts last of all, and it is only ever here for the length of
+    // that trip, so this never lifts an ordinary focused window out of the
+    // stacking order.
     EffectWindow *const active = effects->activeWindow();
-    m_lifted.clear();
+    m_liftedBelow.windows.clear();
+    m_liftedAbove.windows.clear();
     for (const auto &[w, state] : m_states) {
         if (state.hovered || growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon) {
-            m_lifted.push_back(w);
+            LiftGroup &group = state.hovered || w == active ? m_liftedAbove : m_liftedBelow;
+            group.windows.push_back(w);
         }
     }
-    std::ranges::sort(m_lifted, [this, active](EffectWindow *a, EffectWindow *b) {
+    const auto leastEnlarged = [this, active](EffectWindow *a, EffectWindow *b) {
         if (a == active || b == active) {
             return b == active && a != active;
         }
         const BloomState &sa = m_states.at(a);
         const BloomState &sb = m_states.at(b);
         return growth(sa.rect.current, sa.thumbBase) < growth(sb.rect.current, sb.thumbBase);
-    });
+    };
+    std::ranges::sort(m_liftedBelow.windows, leastEnlarged);
+    std::ranges::sort(m_liftedAbove.windows, leastEnlarged);
 
-    // The lifted thumbnails are drawn right after the topmost window that covers
-    // any of them, and not after the whole screen: everything painted later (the
+    // Each group is drawn right after the topmost window that covers any of its
+    // thumbnails, and not after the whole screen: everything painted later (the
     // popup layer the outlines live in, and the cursor) keeps painting over them.
     //
     // The click targets count as covering windows here, even though they are
@@ -1355,26 +1370,75 @@ void ThumbnailBloomEffect::updateLift()
     //
     // When nothing covers any of them they are already the topmost windows, but
     // they still have to be drawn in one place to be ordered among themselves,
-    // so the topmost lifted one becomes the anchor and the set takes its turn.
-    m_liftAnchor = nullptr;
-    if (!m_lifted.empty()) {
-        std::vector<QRect> passed; // thumbnails of the lifted windows already under the walk
+    // so the topmost of the group becomes its own anchor and the set takes its
+    // turn there.
+    m_liftedBelow.anchor = nullptr;
+    m_liftedAbove.anchor = nullptr;
+    if (!m_liftedBelow.windows.empty() || !m_liftedAbove.windows.empty()) {
+        std::vector<QRect> passedBelow; // thumbnails of each group already under the walk
+        std::vector<QRect> passedAbove;
+        EffectWindow *fallbackBelow = nullptr; // topmost of the group, cap or no cap
+        int index = 0, belowIndex = -1, aboveIndex = -1, fallbackIndex = -1;
+        bool capped = false; // the walk has reached the active window
+
+        const auto covers = [](const std::vector<QRect> &passed, const QRect &frame) {
+            return std::ranges::any_of(passed, [&](const QRect &r) { return frame.intersects(r); });
+        };
+
         for (EffectWindow *w : effects->stackingOrder()) {
-            if (isLifted(w)) {
-                // The stacking order runs bottom to top, so only what follows
-                // covers the thumbnail; anything below it is already covered.
-                passed.push_back(m_states.at(w).rect.current.toAlignedRect());
-                m_liftAnchor = w;
+            ++index;
+
+            // Everything from the active window up is out of reach of the group
+            // below it, which is the whole point of the split. Checked before w
+            // itself is weighed, so the anchor stays strictly under that window.
+            if (w == active) {
+                capped = true;
+            }
+
+            // The stacking order runs bottom to top, so only what follows covers
+            // the thumbnail; anything below it is already covered.
+            if (isLifted(m_liftedBelow, w)) {
+                passedBelow.push_back(m_states.at(w).rect.current.toAlignedRect());
+                fallbackBelow = w;
+                fallbackIndex = index;
+                if (!capped) {
+                    m_liftedBelow.anchor = w;
+                    belowIndex = index;
+                }
+            } else if (isLifted(m_liftedAbove, w)) {
+                passedAbove.push_back(m_states.at(w).rect.current.toAlignedRect());
+                m_liftedAbove.anchor = w;
+                aboveIndex = index;
             } else if (isRelevant(w)) {
                 const QRect frame = w->frameGeometry().toRect();
-                if (std::ranges::any_of(
-                        passed, [&](const QRect &r) { return frame.intersects(r); })) {
-                    m_liftAnchor = w;
+                if (!capped && covers(passedBelow, frame)) {
+                    m_liftedBelow.anchor = w;
+                    belowIndex = index;
+                }
+                if (covers(passedAbove, frame)) {
+                    m_liftedAbove.anchor = w;
+                    aboveIndex = index;
                 }
             }
         }
+
+        // A thumbnail whose own window is already above the active one has
+        // nothing to be capped under, so the group falls back to its topmost
+        // member and is drawn there, exactly as an uncapped one would be.
+        if (!m_liftedBelow.anchor) {
+            m_liftedBelow.anchor = fallbackBelow;
+            belowIndex = fallbackIndex;
+        }
+
+        // The hovered thumbnail covers the others whatever the stack says, so its
+        // group can never be drawn before theirs. Sharing the anchor is enough:
+        // the paint pass runs the two groups in order at the same window.
+        if (m_liftedAbove.anchor && aboveIndex < belowIndex) {
+            m_liftedAbove.anchor = m_liftedBelow.anchor;
+        }
     }
-    m_liftPending = m_liftAnchor != nullptr;
+    m_liftedBelow.pending = m_liftedBelow.anchor != nullptr;
+    m_liftedAbove.pending = m_liftedAbove.anchor != nullptr;
 }
 
 void ThumbnailBloomEffect::prePaintWindow(
@@ -1407,42 +1471,47 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     }
 
     // The lifted thumbnails are left out at their own places in the stacking
-    // order and drawn again after the anchor: not chaining the call is what keeps
-    // a window out of a pass. The anchor may be a lifted thumbnail itself, and
-    // then its own turn is where the whole set is drawn.
-    if (m_liftPending && isLifted(w)) {
-        if (w == m_liftAnchor) {
-            drawLifted(renderTarget, viewport);
+    // order and drawn again after the anchor of their group: not chaining the
+    // call is what keeps a window out of a pass. An anchor may be a lifted
+    // thumbnail itself, and then its own turn is where its set is drawn.
+    if (!isLifted(w)) {
+        const auto it = m_states.find(w);
+        if (it != m_states.end()) {
+            applyTransform(w, it->second, data);
         }
-        return;
+
+        Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
+
+        drawCaption(renderTarget, viewport, w);
     }
 
-    const auto it = m_states.find(w);
-    if (it != m_states.end()) {
-        applyTransform(w, it->second, data);
+    // Always in this order, which is what puts the hovered thumbnail over the
+    // rest even when the two groups share an anchor.
+    if (w == m_liftedBelow.anchor) {
+        drawLifted(renderTarget, viewport, m_liftedBelow);
     }
-
-    Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
-
-    drawCaption(renderTarget, viewport, w);
-
-    if (w == m_liftAnchor) {
-        drawLifted(renderTarget, viewport);
+    if (w == m_liftedAbove.anchor) {
+        drawLifted(renderTarget, viewport, m_liftedAbove);
     }
 }
 
 bool ThumbnailBloomEffect::isLifted(EffectWindow *w) const
 {
-    return std::ranges::find(m_lifted, w) != m_lifted.end();
+    return isLifted(m_liftedBelow, w) || isLifted(m_liftedAbove, w);
+}
+
+bool ThumbnailBloomEffect::isLifted(const LiftGroup &group, EffectWindow *w)
+{
+    return std::ranges::find(group.windows, w) != group.windows.end();
 }
 
 void ThumbnailBloomEffect::drawLifted(
-    const RenderTarget &renderTarget, const RenderViewport &viewport)
+    const RenderTarget &renderTarget, const RenderViewport &viewport, LiftGroup &group)
 {
-    if (!m_liftPending) {
+    if (!group.pending) {
         return;
     }
-    m_liftPending = false;
+    group.pending = false;
 
     // Read once for the whole set rather than per outline: building a
     // KColorScheme means reading and computing a whole palette, and every
@@ -1451,7 +1520,7 @@ void ThumbnailBloomEffect::drawLifted(
 
     // Least enlarged first: the set is ordered that way, so the thumbnail the
     // pointer is growing ends up over the ones it is leaving behind.
-    for (EffectWindow *w : m_lifted) {
+    for (EffectWindow *w : group.windows) {
         const auto it = m_states.find(w);
         if (it == m_states.end()) {
             continue;

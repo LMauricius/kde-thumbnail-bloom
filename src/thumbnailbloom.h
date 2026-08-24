@@ -76,9 +76,9 @@ private:
     template <typename T>
     struct Animated
     {
-        T from { }; //!< value the running animation started at
-        T to { }; //!< value the animation ends at
-        T current { }; //!< value used by the current frame
+        T from {}; //!< value the running animation started at
+        T to {}; //!< value the animation ends at
+        T current {}; //!< value used by the current frame
 
         /*! Puts the channel at \a value with no trip in flight. */
         void snap(const T &value) { from = to = current = value; }
@@ -116,6 +116,21 @@ private:
             overlayWindow; //!< the click target as the scene knows it, while it is shown
         std::unique_ptr<OverlayWindow>
             shield; //!< swallows the input the vacated real geometry would still get
+    };
+
+    /*!
+     * One set of thumbnails drawn out of turn, and where in the pass that
+     * happens.
+     *
+     * The lifted thumbnails come in two of these, so that only the hovered one
+     * ends up over the active window; see updateLift().
+     */
+    struct LiftGroup
+    {
+        std::vector<KWin::EffectWindow *> windows; //!< the thumbnails, least enlarged first
+        KWin::EffectWindow *anchor
+            = nullptr; //!< window they are drawn right after, possibly one of them
+        bool pending = false; //!< whether they still have to be drawn in this pass
     };
 
     // --- state handling ---
@@ -202,12 +217,15 @@ private:
      * geometry, for the caller to forget.
      */
     std::vector<KWin::EffectWindow *> advanceAnimations(KWin::ScreenPrePaintData &data);
-    /*! Rebuilds m_lifted (least enlarged first) and picks the anchor their redraw follows. */
+    /*! Rebuilds both lift groups (least enlarged first) and picks the anchor each one follows. */
     void updateLift();
     /*! Whether \a w is one of the thumbnails drawn above the windows covering them. */
     bool isLifted(KWin::EffectWindow *w) const;
-    /*! Draws the lifted thumbnails, least enlarged first, if they are still due in this pass. */
-    void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport);
+    /*! Whether \a w is one of \a group. */
+    static bool isLifted(const LiftGroup &group, KWin::EffectWindow *w);
+    /*! Draws \a group, least enlarged first, if it is still due in this pass. */
+    void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+        LiftGroup &group);
     /*!
      * Draws the hover outline just inside the thumbnail of \a w, in logical
      * screen coordinates.
@@ -286,11 +304,9 @@ private:
     KWin::EffectWindow *m_menuOwner
         = nullptr; //!< window whose menu is open, kept focused meanwhile
     KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing
-    std::vector<KWin::EffectWindow *>
-        m_lifted; //!< thumbnails drawn above the other windows, least enlarged first
-    KWin::EffectWindow *m_liftAnchor
-        = nullptr; //!< window they are drawn right after, possibly one of them
-    bool m_liftPending = false; //!< whether they still have to be drawn in this pass
+    LiftGroup m_liftedBelow; //!< the unhovered ones, drawn no higher than the active window
+    LiftGroup
+        m_liftedAbove; //!< the hovered one and the window travelling home, drawn over the rest
     bool m_skipKeepAbove = true;
     bool m_skipOnAllDesktops = true;
     bool m_skipMaximized = true;
