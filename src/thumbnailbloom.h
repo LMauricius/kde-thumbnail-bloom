@@ -281,11 +281,23 @@ private:
      * come to nothing on that screen. It is therefore taken out of the placement
      * entirely (it blocks nothing, wherever it sits in the stack) while it keeps
      * hiding what it covers, so the windows behind it are exactly the ones that
-     * bloom out over it. Only while the window being worked in is not maximized
-     * itself: with two maximized windows swapped between, the one in front is
-     * the whole point and nothing may be laid over it.
+     * bloom out over it. Only on a screen updateBackdropScreens() allowed it on.
      */
-    bool isBackdrop(KWin::EffectWindow *w, KWin::EffectWindow *active) const;
+    bool isBackdrop(KWin::EffectWindow *w) const;
+    /*!
+     * Recomputes the screens the backdrop exception applies to, \a ignored
+     * telling for each window of \a relevant whether the settings exempt it.
+     *
+     * The topmost window of a screen is what that screen is being used for, and
+     * a maximized one there is what the user asked to see: nothing may be laid
+     * over it, so that screen gets no backdrops at all. Windows the settings
+     * exempt are passed over on the way to it, a maximized one excepted, since
+     * "skip maximized" exempts exactly the windows the question is about. Every
+     * screen is answered on its own, so a maximized window in front on one of
+     * them holds back nothing on the others.
+     */
+    void updateBackdropScreens(
+        const std::vector<KWin::EffectWindow *> &relevant, const std::vector<bool> &ignored);
     /*! Whether \a w is one of the effect's own click targets or shields. */
     bool isOwnOverlay(KWin::EffectWindow *w) const;
     /*! Whether \a w is one of the effect's own click targets, the surfaces the captions are painted on. */
@@ -312,6 +324,8 @@ private:
         = 15.0; //!< angle a resting thumbnail is turned by, in degrees; 0 keeps them flat
     LayoutOptions m_layoutOptions;
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
+    QSet<KWin::LogicalOutput *>
+        m_backdropScreens; //!< screens whose maximized windows are backdrops, from the last layout
     ShieldFilter m_shieldFilter;
     TouchDragFilter m_touchDragFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints

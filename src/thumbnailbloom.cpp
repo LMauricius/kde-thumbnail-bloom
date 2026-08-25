@@ -529,16 +529,25 @@ void ThumbnailBloomEffect::relayout()
 
     const QSet<EffectWindow *> parents = transientParents(relevant);
 
+    // Worked out once and handed to everything below: being ignored is the
+    // larger half of being ineligible, it decides which window speaks for its
+    // screen, and it is the half that can cost a screen lookup.
+    std::vector<bool> ignored;
+    ignored.reserve(relevant.size());
+    for (EffectWindow *w : relevant) {
+        ignored.push_back(isIgnored(w, parents));
+    }
+
+    updateBackdropScreens(relevant, ignored);
+
     // Windows only ever collide with windows of their own screen, so each screen
     // is laid out on its own. The stacking order is preserved per screen.
     EffectWindow *active = effects->activeWindow();
     QHash<LogicalOutput *, QList<LayoutWindow>> perScreen;
-    for (EffectWindow *w : relevant) {
-        // Worked out once and handed to both: being ignored is the larger half
-        // of being ineligible, and it is the half that can cost a screen lookup.
-        const bool ignored = isIgnored(w, parents);
+    for (size_t i = 0; i < relevant.size(); ++i) {
+        EffectWindow *w = relevant[i];
         perScreen[w->screen()].append(LayoutWindow {
-            w, frameRect(w), isEligible(w, ignored), w == active, ignored, isBackdrop(w, active) });
+            w, frameRect(w), isEligible(w, ignored[i]), w == active, ignored[i], isBackdrop(w) });
     }
 
     applyPlacements(perScreen);
@@ -984,7 +993,6 @@ void ThumbnailBloomEffect::updateShields()
     QSet<EffectWindow *> shielded;
     QSet<Window *> bloomedWindows;
     QSet<Window *> backdropWindows;
-    EffectWindow *const active = effects->activeWindow();
     const QList<EffectWindow *> stack = effects->stackingOrder();
     for (auto it = stack.crbegin(); it != stack.crend(); ++it) {
         EffectWindow *w = *it;
@@ -995,7 +1003,7 @@ void ThumbnailBloomEffect::updateShields()
         // Gathered on this walk rather than kept from the layout: the filter has
         // to be told about them on every pass anyway, and a set of windows the
         // effect held on to would outlive the ones that get closed.
-        if (isBackdrop(w, active)) {
+        if (isBackdrop(w)) {
             backdropWindows.insert(w->window());
         }
 
@@ -1146,15 +1154,45 @@ bool ThumbnailBloomEffect::isEligible(EffectWindow *w, bool ignored) const
     return !ignored;
 }
 
-bool ThumbnailBloomEffect::isBackdrop(EffectWindow *w, EffectWindow *active) const
+void ThumbnailBloomEffect::updateBackdropScreens(
+    const std::vector<EffectWindow *> &relevant, const std::vector<bool> &ignored)
 {
-    // Two maximized windows swapped between: the one in front is what the user
-    // asked for, and laying thumbnails over it would undo that. Everything else
-    // is on top of a maximized window that is only in the way.
-    if (active && isMaximized(active)) {
-        return false;
+    m_backdropScreens.clear();
+
+    // Top down (`relevant` runs bottom up), the first window that speaks for its
+    // screen settling it and the rest of that screen being skipped over. A
+    // window the settings exempt says nothing, since a keep-above note or a
+    // window kept on every desktop is not what the screen is being used for.
+    // A maximized one is the exception to that exception: "skip maximized"
+    // exempts exactly the windows this question is about, and passing them over
+    // would answer with whatever they cover and make every maximized window in
+    // front a backdrop.
+    QSet<LogicalOutput *> settled;
+    for (size_t i = relevant.size(); i-- > 0;) {
+        EffectWindow *w = relevant[i];
+        const bool maximized = isMaximized(w);
+        if (ignored[i] && !maximized) {
+            continue;
+        }
+
+        LogicalOutput *screen = w->screen();
+        if (settled.contains(screen)) {
+            continue;
+        }
+        settled.insert(screen);
+
+        // A maximized window in front is what the user asked to look at, so
+        // nothing is laid over it; anything else means the maximized windows
+        // below it are only in the way.
+        if (!maximized) {
+            m_backdropScreens.insert(screen);
+        }
     }
-    return isMaximized(w);
+}
+
+bool ThumbnailBloomEffect::isBackdrop(EffectWindow *w) const
+{
+    return m_backdropScreens.contains(w->screen()) && isMaximized(w);
 }
 
 bool ThumbnailBloomEffect::isMaximized(EffectWindow *w) const
