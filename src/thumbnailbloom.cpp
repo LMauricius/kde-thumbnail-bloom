@@ -187,6 +187,9 @@ static bool underBackdrop(const QList<LayoutWindow> &stack, const void *id, cons
 //! Width of the hover outline, in logical pixels.
 constexpr qreal outlineWidth = 2.0;
 
+//! Opacity below which the hover outline is not worth a draw call.
+constexpr qreal outlineEpsilon = 1e-2;
+
 //! How far past its resting growth of 1 a thumbnail must be drawn to count as lifted.
 constexpr qreal liftEpsilon = 1e-3;
 
@@ -620,6 +623,10 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // ordinary window again, so it fades back to fully opaque just like the
     // hovered thumbnail does.
     const bool thumbnail = !sameRect(base, frameRect(w));
+    // Whether the thumbnail is drawn above its resting size at this very moment,
+    // measured against the rectangle it was resting at before this trip: it has
+    // to be read before that rectangle is replaced below.
+    const bool liftedNow = growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon;
     // The rectangle the lift measures against. It only ever follows a real
     // thumbnail, so the window travelling home keeps the one it is leaving:
     // measuring the trip against the real geometry would call it a shrink and
@@ -639,6 +646,39 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // flattens out under the pointer, so a hovered window is seen head on, and it
     // is gone before the window is back where it really is.
     const qreal targetBend = targetCaption;
+    // The outline marks the pointer and nothing else, so it hangs on the hover
+    // alone: every other trip a thumbnail makes (blooming out, being relaid out,
+    // travelling home) leaves it at zero and draws no outline at all.
+    const qreal targetHighlight = state.hovered ? 1.0 : 0.0;
+
+    // Which trip this is, which is what the lift follows: the size the thumbnail
+    // happens to be drawn at along the way decides nothing, since judging by that
+    // would lift every thumbnail heading for a smaller rectangle (it is above
+    // that one until it arrives) and draw it over everything, the active window
+    // included, for the length of every layout change.
+    const bool goingHome = !thumbnail;
+    if (state.hovered) {
+        // The pointer's own growth.
+        state.lift = Lift::Hover;
+    } else if (goingHome) {
+        // Only the picked thumbnail is drawn over the rest on the way back to its
+        // window. Any other window that stops blooming (one that came uncovered,
+        // one the settings just exempted) travels home at the depth its stacking
+        // position gives it, like every other thumbnail in motion.
+        state.lift = w == effects->activeWindow() ? Lift::Home : Lift::None;
+    } else if (state.lift == Lift::Hover && liftedNow) {
+        // The growth is undone at the pointer's pace: the hover is over the
+        // moment the pointer leaves, but the thumbnail is still drawn above its
+        // resting size and keeps its lift until it has come all the way down.
+        // This is the only trip that carries a lift into the next one. A
+        // thumbnail that is merely drawn large for some other reason (one caught
+        // half way home by a relayout that blooms it again) is starting an
+        // ordinary trip, and lifting it for the size it happens to have would put
+        // it over the active window for as long as that trip lasts.
+        state.lift = Lift::Hover;
+    } else {
+        state.lift = Lift::None;
+    }
 
     // Nothing is bent unless it is painted through an offscreen texture, and
     // that is decided per window rather than once, since a state can be inserted
@@ -659,9 +699,11 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
         state.opacity.snap(1.0);
         state.caption.snap(0.0);
         state.bend.snap(0.0);
+        state.highlight.snap(0.0);
     } else if (sameRect(state.rect.to, target) && qFuzzyCompare(state.opacity.to, targetOpacity)
         && qFuzzyCompare(state.caption.to, targetCaption)
-        && qFuzzyCompare(state.bend.to, targetBend)) {
+        && qFuzzyCompare(state.bend.to, targetBend)
+        && qFuzzyCompare(state.highlight.to, targetHighlight)) {
         return;
     }
 
@@ -684,6 +726,7 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     state.opacity.restart(targetOpacity);
     state.caption.restart(targetCaption);
     state.bend.restart(targetBend);
+    state.highlight.restart(targetHighlight);
     state.timeline.setEasingCurve(
         (inserted || state.timeline.done()) ? QEasingCurve::InOutCubic : QEasingCurve::OutCubic);
     state.timeline.setDuration(m_animationDuration);
@@ -1377,6 +1420,7 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         state.opacity.interpolate(progress);
         state.caption.interpolate(progress);
         state.bend.interpolate(progress);
+        state.highlight.interpolate(progress);
         if (state.overlay) {
             state.overlay->setCaptionOpacity(state.caption.current);
         }
@@ -1414,13 +1458,20 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
     // until it has shrunk all the way back: the hover is over the moment the
     // pointer leaves, but the way back takes a whole animation, and dropping the
     // thumbnail behind its neighbours at the first frame of it is a visible jump.
-    // The size it is drawn at is the test, so no timeline has to be consulted:
-    // between the hover ending and the relayout that retargets the animation the
-    // timeline is still the finished one of the way up.
+    // The size it is drawn at is the second half of the test, so no timeline has
+    // to be consulted: between the hover ending and the relayout that retargets
+    // the animation the timeline is still the finished one of the way up.
     //
-    // The window on its way back to its real geometry is lifted by the same
-    // test: it is growing past its resting thumbnail, and its trip crosses the
-    // thumbnails it is leaving behind.
+    // The first half is retarget()'s flag, which asks which trip the thumbnail is
+    // on: the pointer's and the picked window's way home are lifted, every other
+    // one is not. A thumbnail merely being relaid out is drawn over whatever the
+    // stacking order says once it arrives, so it is drawn there on the way as
+    // well, and the size test alone would lift every thumbnail whose new
+    // rectangle is smaller than the one it is leaving.
+    //
+    // The active window on its way back to its real geometry is lifted by both: it
+    // is the thumbnail that was just picked, growing past its resting rectangle,
+    // and its trip crosses the thumbnails it is leaving behind.
     //
     // A thumbnail laid over a backdrop is lifted for as long as it is one, size
     // or no size: its own place in the stacking order is under the backdrop, so
@@ -1460,7 +1511,8 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
         if (screen && w->screen() != screen) {
             continue;
         }
-        const bool resizing = growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon;
+        const bool resizing = state.lift != Lift::None
+            && growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon;
         if (state.hovered || state.overBackdrop || resizing) {
             LiftGroup &group
                 = state.hovered || resizing || w == active ? m_liftedAbove : m_liftedBelow;
@@ -1663,6 +1715,11 @@ void ThumbnailBloomEffect::drawLifted(
         // over the thumbnail rather than under it, like every other one does.
         drawCaption(renderTarget, viewport, w);
 
+        // The outline marks the hover, not the lift: it is drawn at the opacity
+        // of the highlight channel, which only the pointer ever raises. A
+        // thumbnail lifted for any other reason (one lying over a backdrop, one
+        // travelling home, one shrinking back after the pointer left) is at zero
+        // there and gets none.
         drawOutline(renderTarget, viewport, w, it->second, outline);
     }
 }
@@ -1706,7 +1763,8 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
     const QColor &color) const
 {
     const QRectF rect = state.rect.current;
-    if (!effects->isOpenGLCompositing() || rect.isEmpty()) {
+    const qreal opacity = state.highlight.current;
+    if (!effects->isOpenGLCompositing() || rect.isEmpty() || opacity <= outlineEpsilon) {
         return;
     }
 
@@ -1744,11 +1802,17 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
     vbo->reset();
     vbo->setVertices(vertices);
 
+    // Premultiplied by hand: the uniform goes to the shader as it is, and the
+    // blend below expects the colour to carry its own alpha already.
+    const QColor faded = QColor::fromRgbF(color.redF() * color.alphaF() * opacity,
+        color.greenF() * color.alphaF() * opacity, color.blueF() * color.alphaF() * opacity,
+        color.alphaF() * opacity);
+
     ShaderBinder binder(ShaderTrait::UniformColor | ShaderTrait::TransformColorspace);
     GLShader *shader = binder.shader();
     shader->setUniform(
         GLShader::Mat4Uniform::ModelViewProjectionMatrix, viewport.projectionMatrix());
-    shader->setUniform(GLShader::ColorUniform::Color, color);
+    shader->setUniform(GLShader::ColorUniform::Color, faded);
     shader->setColorspaceUniforms(
         ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
 

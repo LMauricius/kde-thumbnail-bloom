@@ -71,7 +71,7 @@ private:
     /*!
      * One animated value: where the running trip started, where it ends, and
      * what the current frame uses. Pure data; the TimeLine driving the progress
-     * lives in BloomState, one for all four channels.
+     * lives in BloomState, one for all of its channels.
      */
     template <typename T>
     struct Animated
@@ -93,6 +93,17 @@ private:
     };
 
     /*!
+     * Which trip a thumbnail is on, of the two the paint pass draws out of the
+     * stacking order. Every other move it makes is an ordinary one.
+     */
+    enum class Lift
+    {
+        None, //!< laid out like any other thumbnail, wherever it is heading
+        Hover, //!< the pointer's growth, and the way back down from it
+        Home, //!< the picked thumbnail travelling back to its own window
+    };
+
+    /*!
      * Everything the effect keeps around for one bloomed window: where its
      * thumbnail travels from and to, and its click target.
      */
@@ -105,9 +116,12 @@ private:
         Animated<qreal> opacity; //!< thumbnail opacity, 1.0 when hovered or at home
         Animated<qreal> caption; //!< caption opacity the click target paints with
         Animated<qreal> bend; //!< bend strength, 0 flat, 1 full angle
+        Animated<qreal>
+            highlight; //!< hover outline opacity, 1 while the pointer is on the thumbnail
         bool redirected
             = false; //!< whether the window is being painted through an offscreen texture
         bool hovered = false; //!< whether the pointer is on the thumbnail
+        Lift lift = Lift::None; //!< the trip the thumbnail is on, settled by retarget()
         bool overBackdrop
             = false; //!< whether the thumbnail is drawn over a backdrop stacked above its window
         QRegion
@@ -238,8 +252,10 @@ private:
      *
      * The whole \a state is taken rather than a rectangle, because the outline
      * is turned by the same bend as the pixels of the thumbnail and needs the
-     * strength this frame is drawn with. \a color is read once for the whole
-     * set of them, a palette being too much to build per outline.
+     * strength this frame is drawn with, and it is drawn at the opacity of the
+     * state's highlight channel, so that it fades with the hover instead of
+     * blinking away with it. \a color is read once for the whole set of them, a
+     * palette being too much to build per outline.
      */
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         KWin::EffectWindow *w, const BloomState &state, const QColor &color) const;
