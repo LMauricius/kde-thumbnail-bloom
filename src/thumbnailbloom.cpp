@@ -703,6 +703,12 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const Q
     // that one until it arrives) and draw it over everything, the active window
     // included, for the length of every layout change.
     const bool goingHome = !thumbnail;
+
+    // Whether this is the same trip home the thumbnail was already on, which is
+    // what lets it keep its clock below rather than starting over.
+    const bool following = goingHome && state.homing && !inserted;
+    state.homing = goingHome;
+
     if (diving) {
         // Everything a dive shrinks into sits under the window that has just
         // taken the screen over, so the whole set is drawn out of the stacking
@@ -782,22 +788,33 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const Q
     // frames.
     //
     // What must not come back with the restart is the slow start of the easing
-    // curve: a target that keeps moving (a window being dragged over the
-    // thumbnail) retargets on every frame, and easing in from a standstill each
-    // time leaves the thumbnail crawling behind it. A thumbnail that is already
-    // in motion therefore switches to a curve that starts at full speed and only
-    // eases out, which picks up where the previous trip left off closely enough
-    // for the eye and follows a moving target frame by frame.
+    // curve: a thumbnail that is already in motion switches to a curve that
+    // starts at full speed and only eases out, which picks up where the previous
+    // trip left off closely enough for the eye.
     state.rect.restart(target);
     state.opacity.restart(targetOpacity);
     state.caption.restart(targetCaption);
     state.bend.restart(targetBend);
     state.highlight.restart(targetHighlight);
-    state.timeline.setEasingCurve((inserted || bursting || state.timeline.done())
-            ? QEasingCurve::InOutCubic
-            : QEasingCurve::OutCubic);
-    state.timeline.setDuration(m_animationDuration);
-    state.timeline.reset();
+
+    // The trip home is the one exception: it is re-aimed, never started over. Its
+    // destination is the window's own geometry, which the user can be dragging
+    // around while the thumbnail chases it, and the geometry changes arrive per
+    // pointer event rather than per frame. Restarting there resets the clock
+    // oftener than the frames advance it, so the thumbnail crawls behind the
+    // window and the trip never ends, which is also what keeps the state alive:
+    // it is dropped on the frame the trip is over. Re-aiming from wherever the
+    // thumbnail has got to and letting the clock run ends it on time whatever the
+    // window did in the meantime, and the window is drawn where it really is from
+    // then on. Once the clock is spent, every further re-aim lands the thumbnail
+    // on the window at once, so it follows exactly until it is dropped.
+    if (!following) {
+        state.timeline.setEasingCurve((inserted || bursting || state.timeline.done())
+                ? QEasingCurve::InOutCubic
+                : QEasingCurve::OutCubic);
+        state.timeline.setDuration(m_animationDuration);
+        state.timeline.reset();
+    }
 
     m_animating = true;
     effects->addRepaintFull();
@@ -1549,9 +1566,12 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         // A thumbnail that has arrived back at its window is not a thumbnail
         // any more, and neither is one that has dived into the point: there is
         // nothing left of it to draw, and the window it belongs to is under
-        // whatever took the screen over. Click targets are placed by the
+        // whatever took the screen over. Which trip it was on is what decides
+        // this, not where it ended up: a window being dragged has moved on since
+        // the thumbnail was last aimed at it, and comparing the two would hold a
+        // finished trip open frame after frame. Click targets are placed by the
         // relayout, not from here.
-        if (state.diving || sameRect(state.rect.to, frameRect(w))) {
+        if (state.diving || state.homing) {
             settledBack.push_back(w);
         }
     }

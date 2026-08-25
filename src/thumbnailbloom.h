@@ -127,6 +127,8 @@ private:
             = false; //!< whether the thumbnail is drawn over a backdrop stacked above its window
         bool diving
             = false; //!< whether the thumbnail is shrinking into the burst point of its screen
+        bool homing
+            = false; //!< whether the running trip is the one back to the window's real geometry
         QRegion
             hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
