@@ -108,6 +108,8 @@ private:
         bool redirected
             = false; //!< whether the window is being painted through an offscreen texture
         bool hovered = false; //!< whether the pointer is on the thumbnail
+        bool overBackdrop
+            = false; //!< whether the thumbnail is drawn over a backdrop stacked above its window
         QRegion
             hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
@@ -122,8 +124,8 @@ private:
      * One set of thumbnails drawn out of turn, and where in the pass that
      * happens.
      *
-     * The lifted thumbnails come in two of these, so that only the hovered one
-     * ends up over the active window; see updateLift().
+     * The lifted thumbnails come in two of these, so that only the ones the
+     * pointer is animating end up over the active window; see updateLift().
      */
     struct LiftGroup
     {
@@ -271,6 +273,19 @@ private:
     bool isEligible(KWin::EffectWindow *w, bool ignored) const;
     /*! Whether \a w covers its whole maximize area (fullscreen counts as maximized). */
     bool isMaximized(KWin::EffectWindow *w) const;
+    /*!
+     * Whether \a w is a backdrop: a maximized window the thumbnails are shown
+     * over rather than squeezed around.
+     *
+     * A maximized window leaves no free space at all, so the whole effect would
+     * come to nothing on that screen. It is therefore taken out of the placement
+     * entirely (it blocks nothing, wherever it sits in the stack) while it keeps
+     * hiding what it covers, so the windows behind it are exactly the ones that
+     * bloom out over it. Only while the window being worked in is not maximized
+     * itself: with two maximized windows swapped between, the one in front is
+     * the whole point and nothing may be laid over it.
+     */
+    bool isBackdrop(KWin::EffectWindow *w, KWin::EffectWindow *active) const;
     /*! Whether \a w is one of the effect's own click targets or shields. */
     bool isOwnOverlay(KWin::EffectWindow *w) const;
     /*! Whether \a w is one of the effect's own click targets, the surfaces the captions are painted on. */
@@ -304,9 +319,8 @@ private:
     KWin::EffectWindow *m_menuOwner
         = nullptr; //!< window whose menu is open, kept focused meanwhile
     KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing
-    LiftGroup m_liftedBelow; //!< the unhovered ones, drawn no higher than the active window
-    LiftGroup
-        m_liftedAbove; //!< the hovered one and the window travelling home, drawn over the rest
+    LiftGroup m_liftedBelow; //!< the ones at rest, drawn no higher than the active window
+    LiftGroup m_liftedAbove; //!< the ones being resized by a hover or a trip, drawn over the rest
     bool m_skipKeepAbove = true;
     bool m_skipOnAllDesktops = true;
     bool m_skipMaximized = true;

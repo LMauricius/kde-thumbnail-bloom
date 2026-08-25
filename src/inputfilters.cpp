@@ -22,12 +22,13 @@ ShieldFilter::ShieldFilter()
     : InputEventFilter(InputFilterOrder::Popup)
 { }
 
-void ShieldFilter::setState(
-    const QRegion &shields, const QSet<Window *> &bloomed, const QList<Thumbnail> &thumbnails)
+void ShieldFilter::setState(const QRegion &shields, const QSet<Window *> &bloomed,
+    const QList<Thumbnail> &thumbnails, const QSet<Window *> &backdrops)
 {
     m_shields = shields;
     m_bloomed = bloomed;
     m_thumbnails = thumbnails;
+    m_backdrops = backdrops;
 }
 
 ShieldFilter::Hit ShieldFilter::hitAt(const QPointF &pos, const Window *stopAt) const
@@ -61,6 +62,13 @@ ShieldFilter::Hit ShieldFilter::hitAt(const QPointF &pos, const Window *stopAt) 
             continue;
         }
         if (window->isInternal() || m_bloomed.contains(window)) {
+            continue;
+        }
+        // A backdrop is the one window a thumbnail is painted over from below,
+        // so it hides nothing of the one being asked about here. Only above the
+        // stop window, since that is the whole span the question covers: further
+        // down it is an ordinary window taking its own input.
+        if (aboveStop && m_backdrops.contains(window)) {
             continue;
         }
         if (window->hitTest(pos)) {

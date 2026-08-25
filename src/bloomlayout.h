@@ -23,6 +23,8 @@ struct LayoutWindow
     bool reserved = false; //!< whether no thumbnail may ever be placed over this window
     bool ignored
         = false; //!< whether the settings exempt this window from the effect entirely; overrides both flags above
+    bool backdrop = false; //!< whether thumbnails may be placed over this window wherever it sits
+        //!< in the stack, while it still hides what it covers
 };
 
 /*!
@@ -59,7 +61,10 @@ struct Placement
  * is hidden by the windows above it that are staying put. Windows that are themselves becoming thumbnails cover
  * nothing, so one thumbnail does not pull the windows under it along; neither do
  * the LayoutWindow::ignored ones, which the settings keep out of the effect
- * altogether rather than letting them push others aside.
+ * altogether rather than letting them push others aside. A
+ * LayoutWindow::backdrop is the exception to that last part: it hides whatever
+ * it covers even while the settings exempt it, so the windows behind it do get
+ * a thumbnail.
  *
  * Placement then runs twice. The sizing pass lays the thumbnails out packed
  * into the corners of the free space, which keeps what is left of it in one
@@ -73,9 +78,12 @@ struct Placement
  * stack with more than the scraps.
  *
  * Both passes walk the stack from the top down, so the thumbnails nearer the
- * top get the pick of the free space. Every window that is staying put is kept
- * clear, wherever it sits in the stack, so a thumbnail never lands on a window
- * that was visible without it.
+ * top get the pick of the free space. What a thumbnail has to keep clear is
+ * whatever stays put *above* its own window, plus the LayoutWindow::reserved
+ * ones and the thumbnails already handed out: a window below its own is painted
+ * over anyway, so covering it takes nothing away. A LayoutWindow::backdrop is
+ * kept clear of nothing at all, which is what lets a screen filled edge to edge
+ * by one window still show thumbnails.
  *
  * Returns one Placement per bloomed window; windows that stay untouched and
  * windows the smallest thumbnail still finds no room for are absent from the

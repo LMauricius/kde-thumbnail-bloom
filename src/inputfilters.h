@@ -50,19 +50,25 @@ public:
      * from the input, and \a thumbnails the click targets: a thumbnail belongs
      * to its own window, so every button that means nothing on a thumbnail is
      * dropped there rather than handed to whatever it is painted over.
+     *
+     * \a backdrops are the maximized windows the thumbnails are painted over
+     * instead of around. They are ordinary windows for their own input, but they
+     * hide no thumbnail of a window below them, since the paint pass draws those
+     * on top of them.
      */
     void setState(const QRegion &shields, const QSet<KWin::Window *> &bloomed,
-        const QList<Thumbnail> &thumbnails);
+        const QList<Thumbnail> &thumbnails, const QSet<KWin::Window *> &backdrops);
 
     /*!
      * Whether \a window is hidden at \a pos by a window painted over it.
      *
      * A thumbnail is painted at the stacking position of the window it belongs
-     * to, so anything above that window covers it. Which window is at \a pos is
-     * left to KWin's own hit test, so input shapes and decorations are honoured
-     * exactly; only the walk stops early, at the bloomed window itself. Used to
-     * keep a thumbnail from acting where it cannot be seen: the input goes to
-     * the window covering it, as it does over a shield.
+     * to, so anything above that window covers it, the backdrops excepted: those
+     * are the one thing the thumbnails are drawn over. Which window is at \a pos
+     * is left to KWin's own hit test, so input shapes and decorations are
+     * honoured exactly; only the walk stops early, at the bloomed window itself.
+     * Used to keep a thumbnail from acting where it cannot be seen: the input
+     * goes to the window covering it, as it does over a shield.
      */
     bool isCovered(KWin::Window *window, const QPointF &pos) const;
 
@@ -102,6 +108,7 @@ private:
     QRegion m_shields;
     QList<Thumbnail> m_thumbnails;
     QSet<KWin::Window *> m_bloomed;
+    QSet<KWin::Window *> m_backdrops;
 };
 
 /*!

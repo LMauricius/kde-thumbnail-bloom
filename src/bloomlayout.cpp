@@ -211,9 +211,10 @@ static std::optional<SizedSlot> searchSlot(const QRegion &free, const QRectF &ge
  *
  * Two rules, in order: enough of the window lies over a reserved window, so
  * that it is in the way of the window being worked in; or enough of it is
- * hidden by the windows that stay put and are not ignored outright. Both
- * measure the same LayoutOptions::minOccludedFraction of the window's own area,
- * so a window merely grazing another is left alone either way.
+ * hidden by the windows that stay put and are not ignored outright (a backdrop
+ * counts as hiding whether the settings exempt it or not). Both measure the same
+ * LayoutOptions::minOccludedFraction of the window's own area, so a window
+ * merely grazing another is left alone either way.
  */
 static std::vector<bool> selectBloomed(
     const QList<LayoutWindow> &stack, const LayoutOptions &options)
@@ -261,7 +262,11 @@ static std::vector<bool> selectBloomed(
             bloomed[i] = true;
             continue;
         }
-        if (!stack[i].ignored) {
+        // A backdrop hides what is behind it whatever the settings say: the
+        // whole point of it is that those windows bloom out over it, and one
+        // that took nothing with it would leave the screen exactly as covered
+        // as it was.
+        if (!stack[i].ignored || stack[i].backdrop) {
             cover += geometry;
         }
     }
@@ -282,19 +287,21 @@ static std::vector<bool> selectBloomed(
 static constexpr qreal AverageBlend = 0.33;
 
 /*!
- * Everything a thumbnail may not be placed on before any of them are handed
- * out: every window of \a stack that is staying put, grown by the margin.
+ * The part of the screen that is off limits to every thumbnail alike, before
+ * any of them are handed out: the reserved windows, grown by the margin.
  *
- * Stacking has no say here, so the whole set is collected up front: a thumbnail
- * dropped on a window below it in the stack would still be covering that window.
+ * Everything else a thumbnail has to avoid depends on where in the stack that
+ * thumbnail sits, and is collected along the walk instead (see runPass()). The
+ * window being worked in is the exception, since covering it is what the effect
+ * is trying to undo; an ignored one claims nothing even then, exactly as it
+ * claims nothing in the selection.
  */
-static QRegion blockedSeed(const QList<LayoutWindow> &stack, const std::vector<bool> &bloomed,
-    const LayoutOptions &options)
+static QRegion reservedRegion(const QList<LayoutWindow> &stack, const LayoutOptions &options)
 {
     QRegion blocked;
-    for (int i = 0; i < stack.size(); ++i) {
-        if (!bloomed[i]) {
-            blocked += grown(stack[i].geometry.toAlignedRect(), options.margin);
+    for (const LayoutWindow &window : stack) {
+        if (window.reserved && !window.ignored) {
+            blocked += grown(window.geometry.toAlignedRect(), options.margin);
         }
     }
     return blocked;
@@ -305,6 +312,11 @@ static QRegion blockedSeed(const QList<LayoutWindow> &stack, const std::vector<b
  * the stack downwards so that the thumbnails nearer the top get the pick of the
  * free space and each one is placed against the final rectangles of those above
  * it.
+ *
+ * Walking downwards is also what makes \a blocked mean "everything that stays
+ * put above the window at hand": each window that is staying put joins the
+ * region as the walk passes it, so it is in the way of the thumbnails of the
+ * windows above it and of nobody else.
  *
  * \a startScale is the size every thumbnail is tried at first, \a packed picks
  * the slot strategy (see searchSlot()). \a averageScale, when given, receives
@@ -321,11 +333,20 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, const std::vec
     int count = 0;
 
     for (int i = stack.size() - 1; i >= 0; --i) {
-        if (!bloomed[i]) {
-            continue;
-        }
         const LayoutWindow &window = stack[i];
         const QRect geometry = window.geometry.toAlignedRect();
+
+        // A window that stays put is only ever in the way of the thumbnails of
+        // the windows above it: a thumbnail belonging to a window below it is
+        // painted under it anyway, so landing there takes nothing away that was
+        // not already hidden. A backdrop is in nobody's way, which is what lets
+        // a screen filled by one window still show thumbnails over it.
+        if (!bloomed[i]) {
+            if (!window.backdrop) {
+                blocked += grown(geometry, options.margin);
+            }
+            continue;
+        }
         ++count;
 
         const QRegion free = QRegion(area).subtracted(blocked);
@@ -359,7 +380,7 @@ QList<Placement> computeLayout(
 {
     const QRect area = workArea.toAlignedRect();
     const std::vector<bool> bloomed = selectBloomed(stack, options);
-    const QRegion seed = blockedSeed(stack, bloomed, options);
+    const QRegion seed = reservedRegion(stack, options);
 
     // Sizing pass: the same walk, but packing every thumbnail into a corner
     // instead of putting it where it looks best. That leaves the free space in

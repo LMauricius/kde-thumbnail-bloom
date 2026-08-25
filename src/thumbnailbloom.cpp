@@ -156,6 +156,34 @@ static QRectF thumbnailBounds(EffectWindow *w, const QRectF &rect)
         expanded.height() * scaleY);
 }
 
+/*!
+ * Returns whether the thumbnail \a rect of the window \a id would be drawn
+ * under a backdrop: one of \a stack that is stacked above it and overlaps it.
+ *
+ * A thumbnail is painted at the stacking position of its own window, so a
+ * backdrop above that window would simply cover it; those are the thumbnails
+ * the paint pass has to lift out of the stacking order. \a placed are the
+ * windows that got a thumbnail of their own, which a backdrop can be when the
+ * settings let a maximized window bloom: it is then leaving its own geometry and
+ * covers nothing to be lifted over.
+ */
+static bool underBackdrop(const QList<LayoutWindow> &stack, const void *id, const QRectF &rect,
+    const QSet<EffectWindow *> &placed)
+{
+    // From the top down, stopping at the window itself: only what is above it
+    // can be painted over its thumbnail.
+    for (int i = stack.size() - 1; i >= 0; --i) {
+        if (stack[i].id == id) {
+            return false;
+        }
+        if (stack[i].backdrop && stack[i].geometry.intersects(rect)
+            && !placed.contains(static_cast<EffectWindow *>(stack[i].id))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 //! Width of the hover outline, in logical pixels.
 constexpr qreal outlineWidth = 2.0;
 
@@ -509,8 +537,8 @@ void ThumbnailBloomEffect::relayout()
         // Worked out once and handed to both: being ignored is the larger half
         // of being ineligible, and it is the half that can cost a screen lookup.
         const bool ignored = isIgnored(w, parents);
-        perScreen[w->screen()].append(
-            LayoutWindow { w, frameRect(w), isEligible(w, ignored), w == active, ignored });
+        perScreen[w->screen()].append(LayoutWindow {
+            w, frameRect(w), isEligible(w, ignored), w == active, ignored, isBackdrop(w, active) });
     }
 
     applyPlacements(perScreen);
@@ -542,6 +570,12 @@ void ThumbnailBloomEffect::applyPlacements(
             EffectWindow *w = static_cast<EffectWindow *>(placement.id);
             bloomed.insert(w);
             retarget(w, placement.rect);
+            // The paint pass draws such a thumbnail out of the stacking order,
+            // over the backdrop hiding it; asked here rather than per frame,
+            // since it can only change with the layout that decided it.
+            // The placements arrive top down, so a backdrop above this window has
+            // already been entered into `bloomed` if it is leaving itself.
+            m_states.at(w).overBackdrop = underBackdrop(it.value(), w, placement.rect, bloomed);
         }
     }
 
@@ -549,6 +583,10 @@ void ThumbnailBloomEffect::applyPlacements(
     for (auto &[w, state] : m_states) {
         if (!bloomed.contains(w)) {
             state.hovered = false;
+            // Clicking a thumbnail raises its window over the backdrop, and a
+            // backdrop that stopped being one covers nothing either way, so a
+            // window travelling home no longer needs to be drawn out of turn.
+            state.overBackdrop = false;
             retarget(w, frameRect(w));
         }
     }
@@ -945,11 +983,20 @@ void ThumbnailBloomEffect::updateShields()
     QRegion shieldRegion;
     QSet<EffectWindow *> shielded;
     QSet<Window *> bloomedWindows;
+    QSet<Window *> backdropWindows;
+    EffectWindow *const active = effects->activeWindow();
     const QList<EffectWindow *> stack = effects->stackingOrder();
     for (auto it = stack.crbegin(); it != stack.crend(); ++it) {
         EffectWindow *w = *it;
         if (!isInputTarget(w) || isOwnOverlay(w)) {
             continue;
+        }
+
+        // Gathered on this walk rather than kept from the layout: the filter has
+        // to be told about them on every pass anyway, and a set of windows the
+        // effect held on to would outlive the ones that get closed.
+        if (isBackdrop(w, active)) {
+            backdropWindows.insert(w->window());
         }
 
         const QRect frame = w->frameGeometry().toAlignedRect();
@@ -986,7 +1033,7 @@ void ThumbnailBloomEffect::updateShields()
         }
     }
 
-    m_shieldFilter.setState(shieldRegion, bloomedWindows, thumbnailAreas);
+    m_shieldFilter.setState(shieldRegion, bloomedWindows, thumbnailAreas, backdropWindows);
 }
 
 QRegion ThumbnailBloomEffect::placeShield(
@@ -1097,6 +1144,17 @@ bool ThumbnailBloomEffect::isEligible(EffectWindow *w, bool ignored) const
     }
 
     return !ignored;
+}
+
+bool ThumbnailBloomEffect::isBackdrop(EffectWindow *w, EffectWindow *active) const
+{
+    // Two maximized windows swapped between: the one in front is what the user
+    // asked for, and laying thumbnails over it would undo that. Everything else
+    // is on top of a maximized window that is only in the way.
+    if (active && isMaximized(active)) {
+        return false;
+    }
+    return isMaximized(w);
 }
 
 bool ThumbnailBloomEffect::isMaximized(EffectWindow *w) const
@@ -1317,28 +1375,37 @@ void ThumbnailBloomEffect::updateLift()
     // test: it is growing past its resting thumbnail, and its trip crosses the
     // thumbnails it is leaving behind.
     //
+    // A thumbnail laid over a backdrop is lifted for as long as it is one, size
+    // or no size: its own place in the stacking order is under the backdrop, so
+    // drawing it there would not show it at all. The anchor walk below then finds
+    // that backdrop as the topmost window covering it and draws it right after.
+    //
     // They are ordered by that same size, most enlarged last, so the thumbnails
     // still on their way up cover the ones already on their way down.
     //
-    // The set is then split in two, and only the hovered thumbnail may be drawn
-    // over the active window: that window is the one another effect is most
-    // likely to be animating (a minimise, a slide, a wobble), and a thumbnail
-    // stamped over it would be painted where that animation is. The pointer is
-    // the exception, because a thumbnail the user is working with has to be
-    // readable wherever it grows to.
+    // The set is then split in two, and only a thumbnail that is being resized
+    // right now may be drawn over the active window: that window is the one
+    // another effect is most likely to be animating (a minimise, a slide, a
+    // wobble), and a thumbnail parked over it would be painted where that
+    // animation is. One in motion is the exception, because the growing and the
+    // shrinking are the same gesture and dropping the thumbnail behind the
+    // active window halfway through it is the visible jump the lift exists to
+    // avoid. Both trips end at the resting size, where the thumbnail either
+    // stops being lifted at all or falls back into the group below.
     //
-    // The active window itself goes with the hovered ones. While it is in this
-    // set at all it is the thumbnail that was just picked, travelling home, and
-    // nothing may be drawn over it; capping it under itself would mean nothing
-    // anyway. It sorts last of all, and it is only ever here for the length of
-    // that trip, so this never lifts an ordinary focused window out of the
-    // stacking order.
+    // The active window itself goes with them. While it is in this set at all it
+    // is the thumbnail that was just picked, travelling home, and nothing may be
+    // drawn over it; capping it under itself would mean nothing anyway. It sorts
+    // last of all, and it is only ever here for the length of that trip, so this
+    // never lifts an ordinary focused window out of the stacking order.
     EffectWindow *const active = effects->activeWindow();
     m_liftedBelow.windows.clear();
     m_liftedAbove.windows.clear();
     for (const auto &[w, state] : m_states) {
-        if (state.hovered || growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon) {
-            LiftGroup &group = state.hovered || w == active ? m_liftedAbove : m_liftedBelow;
+        const bool resizing = growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon;
+        if (state.hovered || state.overBackdrop || resizing) {
+            LiftGroup &group
+                = state.hovered || resizing || w == active ? m_liftedAbove : m_liftedBelow;
             group.windows.push_back(w);
         }
     }
@@ -1430,8 +1497,8 @@ void ThumbnailBloomEffect::updateLift()
             belowIndex = fallbackIndex;
         }
 
-        // The hovered thumbnail covers the others whatever the stack says, so its
-        // group can never be drawn before theirs. Sharing the anchor is enough:
+        // A thumbnail in motion covers the resting ones whatever the stack says,
+        // so its group can never be drawn before theirs. Sharing the anchor is enough:
         // the paint pass runs the two groups in order at the same window.
         if (m_liftedAbove.anchor && aboveIndex < belowIndex) {
             m_liftedAbove.anchor = m_liftedBelow.anchor;
