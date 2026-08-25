@@ -14,8 +14,10 @@
 #include <core/rendertarget.h>
 #include <core/renderviewport.h>
 #include <cursor.h>
+#include <input.h>
 #include <effect/effecthandler.h>
 #include <options.h>
+#include <pointer_input.h>
 #include <window.h>
 #include <workspace.h>
 #include <effect/effectwindow.h>
@@ -282,6 +284,9 @@ static bool userMoveInProgress()
 /*! Whether the layout holds still right now: reduced motion during a drag. */
 static bool layoutFrozen() { return reducedMotion && userMoveInProgress(); }
 
+/*! Whether a mouse button is down right now. */
+static bool pointerButtonHeld() { return input()->pointer()->buttons() != Qt::NoButton; }
+
 /*!
  * Keeps the internal window behind \a handle out of every list of windows the
  * user can see.
@@ -399,6 +404,17 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
     // synthesises the enter and leave events a QWindow would otherwise receive.
     connect(Cursors::self(), &Cursors::positionChanged, this,
         [this](Cursor *, const QPointF &pos) { updateHover(pos); });
+    // The hover is frozen while a button is held, so the last button coming back
+    // up is what picks it up again. The signal comes from KWin's own button
+    // bookkeeping rather than from a filter, so it arrives whoever ends up
+    // consuming the event (a move, a popup) and the state it reads is already
+    // the new one.
+    connect(input(), &InputRedirection::pointerButtonStateChanged, this,
+        [this](uint32_t, PointerButtonState) {
+            if (!pointerButtonHeld()) {
+                updateHover(effects->cursorPos());
+            }
+        });
 
     for (EffectWindow *w : effects->stackingOrder()) {
         watch(w);
@@ -876,6 +892,16 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
         for (const auto &[w, state] : m_states) {
             setHovered(w, w == owner);
         }
+        return;
+    }
+
+    // A held button means the pointer is busy with whatever it went down on, so
+    // the hover is left exactly as the press found it: one pressed on a
+    // thumbnail keeps that thumbnail, and one pressed anywhere else (a drag
+    // crossing the screen, a selection being pulled out) grows no thumbnail on
+    // its way over. The release signal runs this again from wherever the pointer
+    // came to rest.
+    if (pointerButtonHeld()) {
         return;
     }
 
