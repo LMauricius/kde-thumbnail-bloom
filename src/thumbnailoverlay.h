@@ -96,6 +96,16 @@ public:
     /*! Sets how opaque the caption is painted, from 0 (gone) to 1. */
     void setCaptionOpacity(qreal opacity);
 
+    /*!
+     * Gives up the touch sequence being followed, so that nothing comes of it.
+     *
+     * Called when a second finger lands on the thumbnail and the gesture turns
+     * out to be one for the window itself: the point this was following is put
+     * into the window along with the new one, and no tap, hold or drag may come
+     * of it here any more.
+     */
+    void cancelTouch();
+
 Q_SIGNALS:
     /*! A click or a tap finished on the thumbnail without turning into a drag. */
     void activated();

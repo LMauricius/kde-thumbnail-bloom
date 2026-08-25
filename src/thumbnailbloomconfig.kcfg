@@ -56,6 +56,12 @@ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http:/
             <min>0</min>
             <max>60</max>
         </entry>
+        <entry name="DragActivationDelay" type="Int">
+            <label>How long a drag and drop has to rest on a thumbnail before its window is activated, in milliseconds; zero never activates one</label>
+            <default>1500</default>
+            <min>0</min>
+            <max>10000</max>
+        </entry>
         <entry name="Opacity" type="Int">
             <label>Thumbnail opacity, in percent</label>
             <default>90</default>

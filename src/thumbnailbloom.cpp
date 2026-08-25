@@ -18,6 +18,8 @@
 #include <effect/effecthandler.h>
 #include <options.h>
 #include <pointer_input.h>
+#include <wayland/seat.h>
+#include <wayland_server.h>
 #include <window.h>
 #include <workspace.h>
 #include <effect/effectwindow.h>
@@ -287,6 +289,13 @@ static bool layoutFrozen() { return reducedMotion && userMoveInProgress(); }
 /*! Whether a mouse button is down right now. */
 static bool pointerButtonHeld() { return input()->pointer()->buttons() != Qt::NoButton; }
 
+/*! Whether a drag and drop is being carried across the screen right now. */
+static bool dragInProgress()
+{
+    WaylandServer *server = waylandServer();
+    return server && server->seat() && server->seat()->isDrag();
+}
+
 /*!
  * Keeps the internal window behind \a handle out of every list of windows the
  * user can see.
@@ -353,9 +362,41 @@ static bool sameRect(const QRectF &a, const QRectF &b)
 // ---------------------------------------------------------------------------
 
 ThumbnailBloomEffect::ThumbnailBloomEffect()
+    : m_dragDropFilter(m_shieldFilter)
 {
     input()->installInputEventFilter(&m_shieldFilter);
     input()->installInputEventFilter(&m_touchDragFilter);
+    input()->installInputEventFilter(&m_dragDropFilter);
+
+    // A drag that rests long enough on a thumbnail asks for the window itself,
+    // which is the same thing a click on it asks for.
+    m_dragDropFilter.setActivationHandler([](Window *window) {
+        if (EffectWindow *w = window->effectWindow()) {
+            effects->activateWindow(w);
+        }
+    });
+
+    // A click that went into the window widens the pointer's hold on the
+    // thumbnail to the whole of the enlarged picture, since that is what
+    // whatever the click started is being aimed at.
+    m_shieldFilter.setClickHandler([this](Window *window) {
+        EffectWindow *w = window->effectWindow();
+        const auto it = w ? m_states.find(w) : m_states.end();
+        if (it != m_states.end() && !it->second.clicked) {
+            it->second.clicked = true;
+            scheduleRelayout();
+        }
+    });
+
+    // A second finger on a thumbnail means the gesture is for the window, so the
+    // click target has to let go of the one it was following.
+    m_shieldFilter.setTouchTakenOverHandler([this](Window *window) {
+        EffectWindow *w = window->effectWindow();
+        const auto it = w ? m_states.find(w) : m_states.end();
+        if (it != m_states.end() && it->second.overlay) {
+            it->second.overlay->cancelTouch();
+        }
+    });
 
     // Changes tend to arrive in bursts (a raise is a stacking change plus an
     // activation plus a geometry change), so they only mark the layout dirty.
@@ -462,6 +503,8 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
     m_showTitles = ThumbnailBloomConfig::showTitles();
 
     m_thumbnailOpacity = std::clamp(ThumbnailBloomConfig::opacity() / 100.0, 0.1, 1.0);
+
+    m_dragDropFilter.setActivationDelay(ThumbnailBloomConfig::dragActivationDelay());
 
     // Redirecting a window into a texture costs a render pass per frame, so it
     // is only done while there is a bend to draw; turning the angle down to zero
@@ -624,6 +667,7 @@ void ThumbnailBloomEffect::applyPlacements(
             continue;
         }
         state.hovered = false;
+        state.clicked = false;
         // Clicking a thumbnail raises its window over the backdrop, and a
         // backdrop that stopped being one covers nothing either way, so a
         // window travelling home no longer needs to be drawn out of turn. The
@@ -696,6 +740,10 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const Q
     const QRectF target = state.hovered && !diving
         ? grownRect(base, frameRect(w), QRectF(effects->clientArea(MaximizeArea, w)))
         : base;
+    // What the thumbnail is actually drawn at once it gets there, which is what
+    // a point on it has to be measured against: the picture the pointer is
+    // aiming at is the grown one, not the rectangle the layout handed out.
+    state.hoverRect = target;
     // A thumbnail diving into the point fades out as it goes, so the last frames
     // of it, where there is barely a thumbnail left to scale, are not seen at all.
     const qreal targetOpacity
@@ -897,11 +945,13 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
 
     // A held button means the pointer is busy with whatever it went down on, so
     // the hover is left exactly as the press found it: one pressed on a
-    // thumbnail keeps that thumbnail, and one pressed anywhere else (a drag
-    // crossing the screen, a selection being pulled out) grows no thumbnail on
-    // its way over. The release signal runs this again from wherever the pointer
-    // came to rest.
-    if (pointerButtonHeld()) {
+    // thumbnail keeps that thumbnail, and one pressed anywhere else (a selection
+    // being pulled out, a window being resized) grows no thumbnail on its way
+    // over. The release signal runs this again from wherever the pointer came to
+    // rest. A drag and drop is the exception: it is carried with the button down
+    // and it is going somewhere, so a thumbnail it comes to rest on lights up
+    // like any other drop target.
+    if (pointerButtonHeld() && !dragInProgress()) {
         return;
     }
 
@@ -929,7 +979,8 @@ EffectWindow *ThumbnailBloomEffect::thumbnailUnder(const QPointF &pos) const
     EffectWindow *hovered = nullptr;
     for (const auto &[w, state] : m_states) {
         if (state.overlay && state.overlay->isVisible() && state.hitRegion.contains(pos.toPoint())
-            && !m_shieldFilter.isCovered(w->window(), pos) && (!hovered || state.hovered)) {
+            && (state.clicked || !m_shieldFilter.isCovered(w->window(), pos))
+            && (!hovered || state.hovered)) {
             hovered = w;
         }
     }
@@ -944,6 +995,13 @@ void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
     }
 
     it->second.hovered = hovered;
+
+    // The wider hold belongs to the click, and the click belongs to the visit:
+    // the pointer leaving takes it with it, so the next arrival starts from the
+    // resting rectangle again.
+    if (!hovered) {
+        it->second.clicked = false;
+    }
 
     // Nothing is lifted from here: the lift follows the size the thumbnail is
     // actually drawn at, which the paint pass works out for itself. That is what
@@ -1051,8 +1109,34 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     // cutting the system elements out of that mask hands their own area back to
     // them: the panel keeps its hover feedback and its clicks, and so does every
     // popup that opens over a thumbnail.
-    const QRect rect = state.base.toAlignedRect();
+    // A thumbnail claims its resting rectangle and no more, so that the pointer
+    // can never be held by an area the thumbnail covers only because of that very
+    // pointer. A click changes that: it went into the window, whatever it started
+    // there is being aimed at the enlarged picture, and the pointer has to stay on
+    // the thumbnail for as long as it is on what is drawn. The click target has to
+    // grow with it and not merely answer for a wider area, because the moment the
+    // pointer steps off it the compositor hands the focus to whatever is really
+    // underneath, and the forwarded pointer goes with it.
+    const QRectF claimed
+        = state.clicked && !state.hoverRect.isEmpty() ? state.hoverRect : state.base;
+    const QRect rect = claimed.toAlignedRect();
     state.hitRegion = QRegion(rect) - m_systemRegion;
+
+    // The growth reaches over the neighbouring thumbnails, and two click targets
+    // on the same pixel have no defined order. This one is drawn over them while
+    // the pointer is on it, so it takes that area from them; what it must not do
+    // is swallow them, since the pointer has to be able to reach one by moving
+    // onto it. They keep their own resting rectangles. Only the ones that really
+    // are thumbnails: a window travelling home rests at its own geometry, and
+    // taking that out would carve a window sized hole in this one.
+    if (state.clicked) {
+        for (const auto &[other, s] : m_states) {
+            if (other != w && !s.base.isEmpty() && !s.diving
+                && !sameRect(s.base, frameRect(other))) {
+                state.hitRegion -= s.base.toAlignedRect();
+            }
+        }
+    }
 
     // Both ends of a thumbnail's life: the trip back to its own window and the
     // dive into the point its screen collapses to. Neither leaves anything to
@@ -1136,7 +1220,8 @@ void ThumbnailBloomEffect::updateShields()
             continue;
         }
         thumbnails += state.hitRegion;
-        thumbnailAreas.append(ShieldFilter::Thumbnail { w->window(), state.hitRegion });
+        thumbnailAreas.append(
+            ShieldFilter::Thumbnail { w->window(), state.hitRegion, state.hoverRect });
     }
 
     // Walking the stack top down keeps a shield inside the area where its window

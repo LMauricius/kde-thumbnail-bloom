@@ -112,6 +112,8 @@ private:
     {
         QRectF base; //!< rectangle the layout asked for, before any hover growth
         QRectF thumbBase; //!< resting rectangle of the last thumbnail, kept on the way home
+        //! Rectangle the thumbnail settles at: the grown one while the pointer is on it.
+        QRectF hoverRect;
         Animated<QRectF> rect; //!< rectangle the thumbnail is painted in
         QRectF painted; //!< screen area the last frame drew the thumbnail into
         Animated<qreal> opacity; //!< thumbnail opacity, 1.0 when hovered or at home
@@ -122,6 +124,8 @@ private:
         bool redirected
             = false; //!< whether the window is being painted through an offscreen texture
         bool hovered = false; //!< whether the pointer is on the thumbnail
+        //! Whether a click of the window's own has landed on the thumbnail since the pointer arrived.
+        bool clicked = false;
         Lift lift = Lift::None; //!< the trip the thumbnail is on, settled by retarget()
         bool overBackdrop
             = false; //!< whether the thumbnail is drawn over a backdrop stacked above its window
@@ -129,8 +133,9 @@ private:
             = false; //!< whether the thumbnail is shrinking into the burst point of its screen
         bool homing
             = false; //!< whether the running trip is the one back to the window's real geometry
-        QRegion
-            hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
+        //! What the click target claims, in screen coordinates: the resting rectangle, or the
+        //! whole enlarged one once a click has landed on it, either way minus what covers it.
+        QRegion hitRegion;
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay;
         QPointer<KWin::EffectWindow>
@@ -386,6 +391,7 @@ private:
     bool m_backdropsSettled = false;
     ShieldFilter m_shieldFilter;
     TouchDragFilter m_touchDragFilter;
+    DragDropFilter m_dragDropFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints
     QRegion m_dirty; //!< logical area the running animations have to repaint
     KWin::EffectWindow *m_menuOwner

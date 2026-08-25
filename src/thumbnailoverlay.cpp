@@ -443,6 +443,8 @@ void ThumbnailOverlay::setCaptionOpacity(qreal opacity)
     }
 }
 
+void ThumbnailOverlay::cancelTouch() { resetTouch(); }
+
 void ThumbnailOverlay::invalidateCaption()
 {
     m_captionDirty = true;
