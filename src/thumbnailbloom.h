@@ -129,6 +129,10 @@ private:
         Lift lift = Lift::None; //!< the trip the thumbnail is on, settled by retarget()
         bool overBackdrop
             = false; //!< whether the thumbnail is drawn over a backdrop stacked above its window
+        //! Whether the window is shown where it really is because something it put up holds a
+        //! grab. Its placement still stands in the layout; the state is kept for as long as the
+        //! grab lasts and lifts the window over the ones covering it. See showInPlace().
+        bool blocked = false;
         bool diving
             = false; //!< whether the thumbnail is shrinking into the burst point of its screen
         bool homing
@@ -170,11 +174,35 @@ private:
     QSet<KWin::EffectWindow *> transientParents(
         const std::vector<KWin::EffectWindow *> &relevant) const;
     /*!
+     * Returns the windows whose input something they put up has taken over: the
+     * owners, however far up the transient chain, of every popup holding a grab.
+     *
+     * Such a popup is drawn against the real surface of its window rather than
+     * against the thumbnail, and the grab leaves the thumbnail inert, so the
+     * window shows none of its bloom while one is up; see applyPlacements().
+     */
+    QSet<KWin::EffectWindow *> blockedWindows() const;
+    /*!
      * Retargets every placed window towards its thumbnail, sends the rest of
      * the bloomed ones home, and refreshes the shields and the hover, in that
-     * order.
+     * order. The \a blocked ones are counted among the rest, whatever the layout
+     * handed them.
      */
-    void applyPlacements(const QHash<KWin::LogicalOutput *, QList<LayoutWindow>> &perScreen);
+    void applyPlacements(const QHash<KWin::LogicalOutput *, QList<LayoutWindow>> &perScreen,
+        const QSet<KWin::EffectWindow *> &blocked);
+    /*!
+     * Takes the bloom off \a w and shows it where it really is, for as long as
+     * something it put up holds a grab.
+     *
+     * The click target and the shield go with the thumbnail, so the window has
+     * its own input back, grab and all. Its placement is left standing in the
+     * layout, so that the thumbnails around it hold still and it blooms back
+     * into the very same rectangle once the grab is over. The state is kept
+     * rather than dropped at the end of the trip: it is what draws the window
+     * over the ones covering it, which is the only way it and what it put up are
+     * seen together.
+     */
+    void showInPlace(KWin::EffectWindow *w);
     /*! Queues a relayout for the next event loop pass, coalescing bursts of changes. */
     void scheduleRelayout();
     /*!

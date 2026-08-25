@@ -236,6 +236,42 @@ static bool grabsInput(EffectWindow *w)
 }
 
 /*!
+ * Returns whether \a w is a popup that owns the input while it is up without
+ * ever saying so through a grab.
+ *
+ * hasPopupGrab() is answered by the shell surfaces alone. An X11 menu is an
+ * override redirect window that takes a pointer grab of its own, directly on the
+ * server, and KWin is never told: the window type is all there is to go on
+ * there, so the three kinds that are always opened with a grab are read as one.
+ * The types are listed rather than isPopupWindow() asked because that counts
+ * tooltips in, and a tooltip grabs nothing.
+ */
+static bool grabsInputByType(EffectWindow *w)
+{
+    return w->isX11Client() && (w->isPopupMenu() || w->isDropdownMenu() || w->isComboBox());
+}
+
+/*!
+ * Adds every window \a w is transient for, however deep, to \a owners.
+ *
+ * \a w itself is left out: the question is whose input something has taken
+ * over, and the window holding the grab is never a thumbnail anyway.
+ */
+static void addOwners(EffectWindow *w, QSet<EffectWindow *> &owners)
+{
+    const QList<EffectWindow *> mainWindows = w->mainWindows();
+    for (EffectWindow *parent : mainWindows) {
+        // The set doubles as the visited mark, so a cycle in the transient chain
+        // (nothing stops a client from building one) ends the walk here instead
+        // of recursing for ever.
+        if (!owners.contains(parent)) {
+            owners.insert(parent);
+            addOwners(parent, owners);
+        }
+    }
+}
+
+/*!
  * Returns whether \a w is a system element: something KWin paints in a layer of
  * its own above the ordinary windows (panels, popups, applet popups, menus,
  * notifications, on screen displays) and that never takes part in the layout, so
@@ -612,7 +648,27 @@ void ThumbnailBloomEffect::relayout()
             w, frameRect(w), isEligible(w, ignored[i]), w == active, ignored[i], isBackdrop(w) });
     }
 
-    applyPlacements(perScreen);
+    // Asked here and handed on rather than folded into the layout above: a grab
+    // is no layout input at all, and the placements have to come out exactly as
+    // they would have without it; see applyPlacements().
+    applyPlacements(perScreen, blockedWindows());
+}
+
+QSet<EffectWindow *> ThumbnailBloomEffect::blockedWindows() const
+{
+    QSet<EffectWindow *> blocked;
+    for (EffectWindow *w : effects->stackingOrder()) {
+        // KWin's own surfaces are passed over, the window menu of a thumbnail
+        // among them: it grabs like any other popup, but it is opened on the
+        // thumbnail and belongs to it, so the thumbnail has to stay.
+        if (w->isDeleted() || !w->isVisible() || w->internalWindow()) {
+            continue;
+        }
+        if (grabsInput(w) || grabsInputByType(w)) {
+            addOwners(w, blocked);
+        }
+    }
+    return blocked;
 }
 
 QSet<EffectWindow *> ThumbnailBloomEffect::transientParents(
@@ -632,9 +688,12 @@ QSet<EffectWindow *> ThumbnailBloomEffect::transientParents(
 }
 
 void ThumbnailBloomEffect::applyPlacements(
-    const QHash<LogicalOutput *, QList<LayoutWindow>> &perScreen)
+    const QHash<LogicalOutput *, QList<LayoutWindow>> &perScreen,
+    const QSet<EffectWindow *> &blocked)
 {
     QSet<EffectWindow *> bloomed;
+    // Placed windows a grab of their own is holding out of their bloom; see showInPlace().
+    QSet<EffectWindow *> held;
     for (auto it = perScreen.cbegin(); it != perScreen.cend(); ++it) {
         const QRectF workArea = effects->clientArea(MaximizeArea, it.key());
 
@@ -649,8 +708,28 @@ void ThumbnailBloomEffect::applyPlacements(
 
         for (const Placement &placement : computeLayout(it.value(), workArea, m_layoutOptions)) {
             EffectWindow *w = static_cast<EffectWindow *>(placement.id);
+
+            // Something the window put up has taken the input over: a menu, a
+            // drop down, anything opened with a grab. It is drawn against the
+            // real surface, which is nowhere near the thumbnail, and the grab
+            // leaves the click target inert, so the window is shown where it
+            // really is until the grab is over. Its placement is computed and
+            // thrown away rather than never asked for: the layout has to come
+            // out exactly as it would have, so that the thumbnails around it
+            // hold still and it blooms back into this very rectangle afterwards.
+            // It stays out of `bloomed`, which speaks for the thumbnails alone
+            // (a blocked window really is where it is, backdrop or not).
+            if (blocked.contains(w)) {
+                held.insert(w);
+                showInPlace(w);
+                continue;
+            }
+
             bloomed.insert(w);
             retarget(w, placement.rect, bursting ? &burst : nullptr);
+            // The grab is over: an ordinary thumbnail again, drawn out of the
+            // stacking order only for the reasons every other one is.
+            m_states.at(w).blocked = false;
             // The paint pass draws such a thumbnail out of the stacking order,
             // over the backdrop hiding it; asked here rather than per frame,
             // since it can only change with the layout that decided it.
@@ -663,11 +742,16 @@ void ThumbnailBloomEffect::applyPlacements(
     // Windows that stopped blooming travel back to where they really are.
     EffectWindow *const active = effects->activeWindow();
     for (auto &[w, state] : m_states) {
-        if (bloomed.contains(w)) {
+        // The held ones are already home and stay there. Only the ones the
+        // layout placed: a window with no placement of its own to come back to
+        // (the active one, whose menu is up as often as not) is an ordinary
+        // window that has stopped blooming, grab or no grab.
+        if (bloomed.contains(w) || held.contains(w)) {
             continue;
         }
         state.hovered = false;
         state.clicked = false;
+        state.blocked = false;
         // Clicking a thumbnail raises its window over the backdrop, and a
         // backdrop that stopped being one covers nothing either way, so a
         // window travelling home no longer needs to be drawn out of turn. The
@@ -696,6 +780,46 @@ void ThumbnailBloomEffect::applyPlacements(
     // The click targets have just been placed and moved, so the pointer can end
     // up on another thumbnail without having moved at all.
     updateHover(effects->cursorPos());
+}
+
+void ThumbnailBloomEffect::showInPlace(EffectWindow *w)
+{
+    // Nothing may be aimed at the thumbnail any more, and the hover has to go
+    // before the retarget rather than after it: the retarget reads it to work out
+    // where the window is heading, and one sent home with the hover still
+    // standing would set off towards the grown rectangle of a thumbnail that is
+    // on its way out.
+    const auto it = m_states.find(w);
+    if (it != m_states.end()) {
+        it->second.hovered = false;
+        it->second.clicked = false;
+        // Whatever the thumbnail was drawn over, the window itself is under it
+        // again; the lift it needs now is the blocked one, worked out per frame
+        // by updateLift().
+        it->second.overBackdrop = false;
+    }
+
+    // Home is the window's own geometry, which is what takes the click target
+    // and the shield down with it: both read the destination and let go of a
+    // window that is no longer a thumbnail, handing it its own input back, grab
+    // and all.
+    retarget(w, frameRect(w));
+
+    // Marked after the retarget, which is what creates the state if the window
+    // had none: one whose menu was already open when something else covered it
+    // has never bloomed at all, and it has to be drawn out of the stacking order
+    // just the same.
+    BloomState &state = m_states.at(w);
+    state.blocked = true;
+
+    // Every retarget hands the window back to the offscreen path the bend is
+    // drawn from, and a held window is retargeted by every relayout that comes
+    // along. Once the trip home is over there is no bend left to draw and no
+    // trip to draw it on, so the release advanceAnimations() made on arrival is
+    // held rather than undone frame after frame.
+    if (state.timeline.done()) {
+        setRedirected(w, state, false);
+    }
 }
 
 void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const QPointF *burst)
@@ -1682,6 +1806,20 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         // the thumbnail was last aimed at it, and comparing the two would hold a
         // finished trip open frame after frame. Click targets are placed by the
         // relayout, not from here.
+        //
+        // A window held out of its bloom by a grab is the one arrival that is
+        // not the end of anything: it has to keep its state for as long as the
+        // grab lasts, since that state is what draws it over the windows
+        // covering it, and dropping it here would put it straight back under
+        // them. What it has no more use for is the offscreen texture, which
+        // would cost a render pass a frame on a window that is drawn flat, at
+        // its own size and in its own place; the trip that got it there is over,
+        // so letting go of it now shows nothing.
+        if (state.blocked) {
+            setRedirected(w, state, false);
+            continue;
+        }
+
         if (state.diving || state.homing) {
             settledBack.push_back(w);
         }
@@ -1723,6 +1861,15 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
     // window the resting group is kept under. That is the one place where a
     // lifted thumbnail is not being enlarged.
     //
+    // A window held out of its bloom by a grab of its own is lifted for as long
+    // as it is held, and lifted into the moving group whatever its size: what it
+    // put up is a popup, painted above every ordinary window there is, so a
+    // window left at its own depth would have its menu standing over the very
+    // windows that hide it. Drawn after the topmost window covering it, it comes
+    // out under its own popups and over everything else, which is the whole
+    // point of showing it in place. The active window is no exception here: it
+    // is the likeliest thing to be covering the window that was asked a question.
+    //
     // They are ordered by that same size, most enlarged last, so the thumbnails
     // still on their way up cover the ones already on their way down.
     //
@@ -1759,18 +1906,27 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
         const bool resizing = state.lift != Lift::None
             && growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon;
         const bool diving = state.lift == Lift::Dive;
-        if (state.hovered || state.overBackdrop || resizing || diving) {
-            LiftGroup &group = state.hovered || resizing || diving || w == active ? m_liftedAbove
-                                                                                  : m_liftedBelow;
+        if (state.blocked || state.hovered || state.overBackdrop || resizing || diving) {
+            LiftGroup &group = state.blocked || state.hovered || resizing || diving || w == active
+                ? m_liftedAbove
+                : m_liftedBelow;
             group.windows.push_back(w);
         }
     }
     const auto leastEnlarged = [this, active](EffectWindow *a, EffectWindow *b) {
+        const BloomState &sa = m_states.at(a);
+        const BloomState &sb = m_states.at(b);
+        // A window held out of its bloom is no thumbnail at all: it is drawn at
+        // its own size, in its own place, and everything the lift is really
+        // about belongs over it. It sorts before the lot, the active window
+        // included, since the only trip that brings that one here is its way
+        // home from a thumbnail.
+        if (sa.blocked != sb.blocked) {
+            return sa.blocked;
+        }
         if (a == active || b == active) {
             return b == active && a != active;
         }
-        const BloomState &sa = m_states.at(a);
-        const BloomState &sb = m_states.at(b);
         return growth(sa.rect.current, sa.thumbBase) < growth(sb.rect.current, sb.thumbBase);
     };
     std::ranges::sort(m_liftedBelow.windows, leastEnlarged);
@@ -1866,9 +2022,15 @@ void ThumbnailBloomEffect::prePaintWindow(
 {
     const auto it = m_states.find(w);
     if (it != m_states.end()
-        && (!sameRect(it->second.rect.current, frameRect(w)) || it->second.opacity.current < 1.0)) {
+        && (it->second.blocked || !sameRect(it->second.rect.current, frameRect(w))
+            || it->second.opacity.current < 1.0)) {
         // The window is painted somewhere else and at another size, so it may
         // neither be clipped against nor culled by its real geometry.
+        //
+        // A blocked window is painted at exactly its real geometry, but out of
+        // turn: the windows above it would otherwise cull it out of the pass
+        // altogether, and the draw that comes after their anchor would have
+        // nothing left to work with.
         data.setTransformed();
         data.setTranslucent();
     }
