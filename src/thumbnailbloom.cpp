@@ -1188,6 +1188,15 @@ void ThumbnailBloomEffect::updateBackdropScreens(
             m_backdropScreens.insert(screen);
         }
     }
+
+    // The window being worked in has the last word on its own screen: while the
+    // maximized one is the active window it is what the user is looking at,
+    // whatever ended up stacked over it, so that screen shows no thumbnails over
+    // it either. The screens it is not on are left as the walk decided them.
+    EffectWindow *const active = effects->activeWindow();
+    if (active && active->screen() && isMaximized(active)) {
+        m_backdropScreens.remove(active->screen());
+    }
 }
 
 bool ThumbnailBloomEffect::isBackdrop(EffectWindow *w) const
@@ -1313,7 +1322,7 @@ void ThumbnailBloomEffect::applyTransform(
 void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 {
     const std::vector<EffectWindow *> settledBack = advanceAnimations(data);
-    updateLift();
+    updateLift(data.screen);
 
     // An empty damage is left alone throughout: no pass is drawing anything, and
     // widening one would make a frame out of a pass that was going to paint
@@ -1399,7 +1408,7 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
     return settledBack;
 }
 
-void ThumbnailBloomEffect::updateLift()
+void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
 {
     // A thumbnail is lifted while the pointer has it grown, and stays lifted
     // until it has shrunk all the way back: the hover is over the moment the
@@ -1433,13 +1442,24 @@ void ThumbnailBloomEffect::updateLift()
     //
     // The active window itself goes with them. While it is in this set at all it
     // is the thumbnail that was just picked, travelling home, and nothing may be
-    // drawn over it; capping it under itself would mean nothing anyway. It sorts
+    // drawn over it; keeping it under itself would mean nothing anyway. It sorts
     // last of all, and it is only ever here for the length of that trip, so this
     // never lifts an ordinary focused window out of the stacking order.
+    //
+    // Both groups hold the thumbnails of \a screen alone, and only the windows
+    // painted in this pass can anchor them: the pass draws one screen, so a
+    // group anchored to a window of another one would never be drawn at all.
     EffectWindow *const active = effects->activeWindow();
+    const QRectF screenArea = screen ? QRectF(screen->geometry()) : QRectF();
+    const auto inPass = [screen, &screenArea](EffectWindow *w) {
+        return !screen || w->frameGeometry().intersects(screenArea);
+    };
     m_liftedBelow.windows.clear();
     m_liftedAbove.windows.clear();
     for (const auto &[w, state] : m_states) {
+        if (screen && w->screen() != screen) {
+            continue;
+        }
         const bool resizing = growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon;
         if (state.hovered || state.overBackdrop || resizing) {
             LiftGroup &group
@@ -1482,9 +1502,8 @@ void ThumbnailBloomEffect::updateLift()
     if (!m_liftedBelow.windows.empty() || !m_liftedAbove.windows.empty()) {
         std::vector<QRect> passedBelow; // thumbnails of each group already under the walk
         std::vector<QRect> passedAbove;
-        EffectWindow *fallbackBelow = nullptr; // topmost of the group, cap or no cap
+        EffectWindow *fallbackBelow = nullptr; // topmost of the group, anchor or no anchor
         int index = 0, belowIndex = -1, aboveIndex = -1, fallbackIndex = -1;
-        bool capped = false; // the walk has reached the active window
 
         const auto covers = [](const std::vector<QRect> &passed, const QRect &frame) {
             return std::ranges::any_of(passed, [&](const QRect &r) { return frame.intersects(r); });
@@ -1493,30 +1512,29 @@ void ThumbnailBloomEffect::updateLift()
         for (EffectWindow *w : effects->stackingOrder()) {
             ++index;
 
-            // Everything from the active window up is out of reach of the group
-            // below it, which is the whole point of the split. Checked before w
-            // itself is weighed, so the anchor stays strictly under that window.
-            if (w == active) {
-                capped = true;
-            }
-
             // The stacking order runs bottom to top, so only what follows covers
             // the thumbnail; anything below it is already covered.
             if (isLifted(m_liftedBelow, w)) {
                 passedBelow.push_back(m_states.at(w).rect.current.toAlignedRect());
                 fallbackBelow = w;
                 fallbackIndex = index;
-                if (!capped) {
-                    m_liftedBelow.anchor = w;
-                    belowIndex = index;
-                }
+                m_liftedBelow.anchor = w;
+                belowIndex = index;
             } else if (isLifted(m_liftedAbove, w)) {
                 passedAbove.push_back(m_states.at(w).rect.current.toAlignedRect());
                 m_liftedAbove.anchor = w;
                 aboveIndex = index;
-            } else if (isRelevant(w)) {
+            } else if (isRelevant(w) && inPass(w)) {
                 const QRect frame = w->frameGeometry().toRect();
-                if (!capped && covers(passedBelow, frame)) {
+
+                // The resting group stops short of the active window itself,
+                // which is the whole point of the split. Only of that one
+                // window: the windows above it are what hides the thumbnail
+                // (the backdrop it is laid over among them), and a group held
+                // under those would not be seen at all. Whatever is painted
+                // between them and the active window is hidden anyway, so the
+                // animation the split protects is out of sight there either way.
+                if (w != active && covers(passedBelow, frame)) {
                     m_liftedBelow.anchor = w;
                     belowIndex = index;
                 }
@@ -1527,9 +1545,8 @@ void ThumbnailBloomEffect::updateLift()
             }
         }
 
-        // A thumbnail whose own window is already above the active one has
-        // nothing to be capped under, so the group falls back to its topmost
-        // member and is drawn there, exactly as an uncapped one would be.
+        // Nothing on this screen covers them, so they are drawn at the place of
+        // their topmost member and are only ordered among themselves.
         if (!m_liftedBelow.anchor) {
             m_liftedBelow.anchor = fallbackBelow;
             belowIndex = fallbackIndex;

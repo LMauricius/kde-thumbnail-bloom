@@ -219,8 +219,12 @@ private:
      * geometry, for the caller to forget.
      */
     std::vector<KWin::EffectWindow *> advanceAnimations(KWin::ScreenPrePaintData &data);
-    /*! Rebuilds both lift groups (least enlarged first) and picks the anchor each one follows. */
-    void updateLift();
+    /*!
+     * Rebuilds both lift groups for \a screen (least enlarged first) and picks
+     * the anchor each one follows. Only the thumbnails of that screen take part,
+     * since a pass paints one screen and the anchor has to be painted in it.
+     */
+    void updateLift(KWin::LogicalOutput *screen);
     /*! Whether \a w is one of the thumbnails drawn above the windows covering them. */
     bool isLifted(KWin::EffectWindow *w) const;
     /*! Whether \a w is one of \a group. */
@@ -294,7 +298,9 @@ private:
      * exempt are passed over on the way to it, a maximized one excepted, since
      * "skip maximized" exempts exactly the windows the question is about. Every
      * screen is answered on its own, so a maximized window in front on one of
-     * them holds back nothing on the others.
+     * them holds back nothing on the others. The active window has the last word
+     * on the screen it is on: while it is the maximized one, that screen gets no
+     * backdrops whatever is stacked over it.
      */
     void updateBackdropScreens(
         const std::vector<KWin::EffectWindow *> &relevant, const std::vector<bool> &ignored);
@@ -333,7 +339,7 @@ private:
     KWin::EffectWindow *m_menuOwner
         = nullptr; //!< window whose menu is open, kept focused meanwhile
     KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing
-    LiftGroup m_liftedBelow; //!< the ones at rest, drawn no higher than the active window
+    LiftGroup m_liftedBelow; //!< the ones at rest, drawn no higher than the window covering them
     LiftGroup m_liftedAbove; //!< the ones being resized by a hover or a trip, drawn over the rest
     bool m_skipKeepAbove = true;
     bool m_skipOnAllDesktops = true;
