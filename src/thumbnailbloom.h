@@ -101,6 +101,7 @@ private:
         None, //!< laid out like any other thumbnail, wherever it is heading
         Hover, //!< the pointer's growth, and the way back down from it
         Home, //!< the picked thumbnail travelling back to its own window
+        Dive, //!< the whole screen's thumbnails shrinking into the burst point
     };
 
     /*!
@@ -124,6 +125,8 @@ private:
         Lift lift = Lift::None; //!< the trip the thumbnail is on, settled by retarget()
         bool overBackdrop
             = false; //!< whether the thumbnail is drawn over a backdrop stacked above its window
+        bool diving
+            = false; //!< whether the thumbnail is shrinking into the burst point of its screen
         QRegion
             hitRegion; //!< part of base left uncovered by system elements, in screen coordinates
         KWin::TimeLine timeline;
@@ -167,8 +170,22 @@ private:
     void applyPlacements(const QHash<KWin::LogicalOutput *, QList<LayoutWindow>> &perScreen);
     /*! Queues a relayout for the next event loop pass, coalescing bursts of changes. */
     void scheduleRelayout();
-    /*! Starts or retargets the animation of \a w towards \a base, grown if hovered. */
-    void retarget(KWin::EffectWindow *w, const QRectF &base);
+    /*!
+     * Starts or retargets the animation of \a w towards \a base, grown if hovered.
+     *
+     * An empty \a base is the dive: the thumbnail is not heading anywhere it
+     * could be seen, it is shrinking into the point its whole screen collapses
+     * to, and the state is dropped once it arrives. \a burst is the other half
+     * of the same gesture: the trip then starts at that point, at no size and
+     * fully transparent, rather than wherever the thumbnail happens to be.
+     */
+    void retarget(KWin::EffectWindow *w, const QRectF &base, const QPointF *burst = nullptr);
+    /*!
+     * The point the thumbnails of \a screen burst out of and dive back into:
+     * the centre of the last window that spoke for that screen without being
+     * maximized, or the middle of its work area while there was none.
+     */
+    QPointF burstPoint(KWin::LogicalOutput *screen) const;
     /*! Returns the bloomed window whose window menu is open, if any. */
     KWin::EffectWindow *menuOwner() const;
     /*! Opens the window menu of \a w at \a pos and keeps its thumbnail focused. */
@@ -317,6 +334,15 @@ private:
      * them holds back nothing on the others. The active window has the last word
      * on the screen it is on: while it is the maximized one, that screen gets no
      * backdrops whatever is stacked over it.
+     *
+     * The same walk settles the burst as well. Which screens changed their mind
+     * since the last layout is exactly which ones gained or lost every thumbnail
+     * they had, since a screen out of the exception has its whole work area
+     * blocked by that maximized window and can place nothing; those two sets go
+     * to m_burstScreens and m_diveScreens. The window that speaks for a screen
+     * without being maximized also leaves its centre behind as the point the
+     * burst comes out of, which a maximized speaker then keeps rather than
+     * replaces (see burstPoint()).
      */
     void updateBackdropScreens(
         const std::vector<KWin::EffectWindow *> &relevant, const std::vector<bool> &ignored);
@@ -348,6 +374,14 @@ private:
     QRegion m_systemRegion; //!< screen area covered by panels, popups and other system elements
     QSet<KWin::LogicalOutput *>
         m_backdropScreens; //!< screens whose maximized windows are backdrops, from the last layout
+    //! Screens that took the backdrop exception back in the last layout: their thumbnails all burst out at once.
+    QSet<KWin::LogicalOutput *> m_burstScreens;
+    //! Screens that lost it: their thumbnails all dive into the one point at once.
+    QSet<KWin::LogicalOutput *> m_diveScreens;
+    //! Centre of the last non-maximized window that spoke for each screen; see burstPoint().
+    QHash<KWin::LogicalOutput *, QPointF> m_screenFocus;
+    //! Whether a layout has run at all, so that the first one bursts nothing.
+    bool m_backdropsSettled = false;
     ShieldFilter m_shieldFilter;
     TouchDragFilter m_touchDragFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints

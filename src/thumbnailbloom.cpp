@@ -578,10 +578,20 @@ void ThumbnailBloomEffect::applyPlacements(
     QSet<EffectWindow *> bloomed;
     for (auto it = perScreen.cbegin(); it != perScreen.cend(); ++it) {
         const QRectF workArea = effects->clientArea(MaximizeArea, it.key());
+
+        // A screen that has just taken the backdrop exception back shows every
+        // thumbnail it has at once, so they all set off from the one point
+        // instead of from the windows they belong to. Nothing else changes: they
+        // are laid over the backdrop as always, which draws them under the
+        // window that speaks for the screen and so has them come out from behind
+        // it.
+        const bool bursting = m_burstScreens.contains(it.key());
+        const QPointF burst = bursting ? burstPoint(it.key()) : QPointF();
+
         for (const Placement &placement : computeLayout(it.value(), workArea, m_layoutOptions)) {
             EffectWindow *w = static_cast<EffectWindow *>(placement.id);
             bloomed.insert(w);
-            retarget(w, placement.rect);
+            retarget(w, placement.rect, bursting ? &burst : nullptr);
             // The paint pass draws such a thumbnail out of the stacking order,
             // over the backdrop hiding it; asked here rather than per frame,
             // since it can only change with the layout that decided it.
@@ -592,15 +602,31 @@ void ThumbnailBloomEffect::applyPlacements(
     }
 
     // Windows that stopped blooming travel back to where they really are.
+    EffectWindow *const active = effects->activeWindow();
     for (auto &[w, state] : m_states) {
-        if (!bloomed.contains(w)) {
-            state.hovered = false;
-            // Clicking a thumbnail raises its window over the backdrop, and a
-            // backdrop that stopped being one covers nothing either way, so a
-            // window travelling home no longer needs to be drawn out of turn.
-            state.overBackdrop = false;
-            retarget(w, frameRect(w));
+        if (bloomed.contains(w)) {
+            continue;
         }
+        state.hovered = false;
+        // Clicking a thumbnail raises its window over the backdrop, and a
+        // backdrop that stopped being one covers nothing either way, so a
+        // window travelling home no longer needs to be drawn out of turn. The
+        // dive is drawn out of turn on its own account; see retarget().
+        state.overBackdrop = false;
+
+        // A screen that has just lost the backdrop exception loses every
+        // thumbnail on it at once, and travelling home would show none of that:
+        // the window is under the one that took the screen over, which is why it
+        // had a thumbnail in the first place. They shrink into the point instead.
+        //
+        // The window that was just picked is the exception. It is on its way to
+        // being looked at, so it goes home as always, whatever its screen is
+        // doing. A thumbnail already diving keeps at it, since the burst of
+        // relayouts a single raise produces would otherwise call the dive off
+        // one pass after it began.
+        const bool diving = w != active && !sameRect(state.base, frameRect(w))
+            && (state.diving || m_diveScreens.contains(w->screen()));
+        retarget(w, diving ? QRectF(burstPoint(w->screen()), QSizeF(0, 0)) : frameRect(w));
     }
 
     // Needs the final click targets of every thumbnail, so it comes after the
@@ -612,7 +638,7 @@ void ThumbnailBloomEffect::applyPlacements(
     updateHover(effects->cursorPos());
 }
 
-void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
+void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const QPointF *burst)
 {
     const auto [it, inserted] = m_states.try_emplace(w);
     BloomState &state = it->second;
@@ -623,6 +649,21 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // ordinary window again, so it fades back to fully opaque just like the
     // hovered thumbnail does.
     const bool thumbnail = !sameRect(base, frameRect(w));
+
+    // A destination with no size at all is the dive: the thumbnail is heading
+    // for the point its whole screen collapses into rather than for a place it
+    // could be seen, and it takes everything that makes it a thumbnail down with
+    // it. Asked of a real destination only, so that a window with no geometry to
+    // speak of is still sent home rather than made to dive into itself.
+    const bool diving = thumbnail && base.isEmpty();
+    const bool wasDiving = state.diving;
+    state.diving = diving;
+
+    // The burst only puts a thumbnail at the point when it is not already on its
+    // way there: a dive turned around halfway carries on from wherever it has
+    // got to, exactly as every other reversed trip does, rather than jumping
+    // back to the point first.
+    const bool bursting = burst && !wasDiving;
     // Whether the thumbnail is drawn above its resting size at this very moment,
     // measured against the rectangle it was resting at before this trip: it has
     // to be read before that rectangle is replaced below.
@@ -631,17 +672,22 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // thumbnail, so the window travelling home keeps the one it is leaving:
     // measuring the trip against the real geometry would call it a shrink and
     // drop the window behind the thumbnails it is growing past.
-    if (thumbnail || inserted) {
+    // A dive is measured against the thumbnail it is leaving, exactly as the trip
+    // home is: its own destination has no size at all and would say nothing.
+    if ((thumbnail && !diving) || inserted) {
         state.thumbBase = base;
     }
-    const QRectF target = state.hovered
+    const QRectF target = state.hovered && !diving
         ? grownRect(base, frameRect(w), QRectF(effects->clientArea(MaximizeArea, w)))
         : base;
-    const qreal targetOpacity = (thumbnail && !state.hovered) ? m_thumbnailOpacity : 1.0;
+    // A thumbnail diving into the point fades out as it goes, so the last frames
+    // of it, where there is barely a thumbnail left to scale, are not seen at all.
+    const qreal targetOpacity
+        = diving ? 0.0 : ((thumbnail && !state.hovered) ? m_thumbnailOpacity : 1.0);
     // The caption belongs to the resting thumbnail only: it fades out under the
-    // pointer, and on the way back to the real window it is gone before the
-    // window is itself again.
-    const qreal targetCaption = (thumbnail && !state.hovered) ? 1.0 : 0.0;
+    // pointer, and on the way back to the real window (or into the point) it is
+    // gone before the trip is over.
+    const qreal targetCaption = (thumbnail && !diving && !state.hovered) ? 1.0 : 0.0;
     // The bend belongs to the resting thumbnail just as the caption does: it
     // flattens out under the pointer, so a hovered window is seen head on, and it
     // is gone before the window is back where it really is.
@@ -657,7 +703,14 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     // that one until it arrives) and draw it over everything, the active window
     // included, for the length of every layout change.
     const bool goingHome = !thumbnail;
-    if (state.hovered) {
+    if (diving) {
+        // Everything a dive shrinks into sits under the window that has just
+        // taken the screen over, so the whole set is drawn out of the stacking
+        // order for as long as the dive lasts. Its own depth would show nothing
+        // of it at all, and the shrink alone is not enough for the size test
+        // below to lift it.
+        state.lift = Lift::Dive;
+    } else if (state.hovered) {
         // The pointer's own growth.
         state.lift = Lift::Hover;
     } else if (goingHome) {
@@ -700,11 +753,24 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
         state.caption.snap(0.0);
         state.bend.snap(0.0);
         state.highlight.snap(0.0);
-    } else if (sameRect(state.rect.to, target) && qFuzzyCompare(state.opacity.to, targetOpacity)
+    } else if (!bursting && sameRect(state.rect.to, target)
+        && qFuzzyCompare(state.opacity.to, targetOpacity)
         && qFuzzyCompare(state.caption.to, targetCaption)
         && qFuzzyCompare(state.bend.to, targetBend)
         && qFuzzyCompare(state.highlight.to, targetHighlight)) {
         return;
+    }
+
+    // The burst puts every thumbnail of its screen at the one point before any
+    // of them sets off, so that they all appear to come out of the window that
+    // speaks for the screen. It is applied after the insertion above, which
+    // would otherwise start a new thumbnail at the window it belongs to.
+    if (bursting) {
+        state.rect.snap(QRectF(*burst, QSizeF(0, 0)));
+        state.opacity.snap(0.0);
+        state.caption.snap(0.0);
+        state.bend.snap(0.0);
+        state.highlight.snap(0.0);
     }
 
     // Every retarget starts a whole new trip, from where the thumbnail is right
@@ -727,8 +793,9 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base)
     state.caption.restart(targetCaption);
     state.bend.restart(targetBend);
     state.highlight.restart(targetHighlight);
-    state.timeline.setEasingCurve(
-        (inserted || state.timeline.done()) ? QEasingCurve::InOutCubic : QEasingCurve::OutCubic);
+    state.timeline.setEasingCurve((inserted || bursting || state.timeline.done())
+            ? QEasingCurve::InOutCubic
+            : QEasingCurve::OutCubic);
     state.timeline.setDuration(m_animationDuration);
     state.timeline.reset();
 
@@ -944,16 +1011,18 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     const QRect rect = state.base.toAlignedRect();
     state.hitRegion = QRegion(rect) - m_systemRegion;
 
-    const bool goingHome = sameRect(state.base, frameRect(w));
-    if (goingHome || state.hitRegion.isEmpty()) {
+    // Both ends of a thumbnail's life: the trip back to its own window and the
+    // dive into the point its screen collapses to. Neither leaves anything to
+    // click, and both have a caption to fade out first.
+    const bool leaving = sameRect(state.base, frameRect(w)) || state.diving;
+    if (leaving || state.hitRegion.isEmpty()) {
         state.hitRegion = QRegion();
         if (state.overlay) {
-            // A thumbnail on its way back to its window keeps its click target
-            // up, where it is, for as long as the caption is still fading out on
-            // it. It must not act as a thumbnail any more though, so it is made
-            // output only; the state (and with it the window) is dropped once
-            // the trip ends.
-            if (goingHome && state.caption.current > 0) {
+            // A thumbnail on its way out keeps its click target up, where it is,
+            // for as long as the caption is still fading out on it. It must not
+            // act as a thumbnail any more though, so it is made output only; the
+            // state (and with it the window) is dropped once the trip ends.
+            if (leaving && state.caption.current > 0) {
                 state.overlay->setOutputOnly(true);
             } else {
                 state.overlay->hide();
@@ -1200,6 +1269,9 @@ bool ThumbnailBloomEffect::isEligible(EffectWindow *w, bool ignored) const
 void ThumbnailBloomEffect::updateBackdropScreens(
     const std::vector<EffectWindow *> &relevant, const std::vector<bool> &ignored)
 {
+    // Kept for the diff at the end: a screen changing its mind is what makes
+    // every thumbnail on it appear or disappear at once.
+    const QSet<LogicalOutput *> previous = m_backdropScreens;
     m_backdropScreens.clear();
 
     // Top down (`relevant` runs bottom up), the first window that speaks for its
@@ -1227,8 +1299,15 @@ void ThumbnailBloomEffect::updateBackdropScreens(
         // A maximized window in front is what the user asked to look at, so
         // nothing is laid over it; anything else means the maximized windows
         // below it are only in the way.
+        //
+        // The window that speaks without being maximized is also the one the
+        // thumbnails of this screen come out of and go back into, so its centre
+        // is kept. A maximized speaker leaves the old point standing: the
+        // thumbnails that are about to disappear belong to the arrangement it
+        // replaced, and that is where they came from.
         if (!maximized) {
             m_backdropScreens.insert(screen);
+            m_screenFocus[screen] = frameRect(w).center();
         }
     }
 
@@ -1240,6 +1319,31 @@ void ThumbnailBloomEffect::updateBackdropScreens(
     if (active && active->screen() && isMaximized(active)) {
         m_backdropScreens.remove(active->screen());
     }
+
+    // A screen out of the exception has a maximized window across the whole of
+    // its work area, which blocks every placement there is, so gaining and
+    // losing the exception is gaining and losing every thumbnail of that screen.
+    // That is the one change the burst animation is for.
+    m_burstScreens = m_backdropScreens;
+    m_burstScreens.subtract(previous);
+    m_diveScreens = previous;
+    m_diveScreens.subtract(m_backdropScreens);
+
+    // The first layout has nothing to compare against: the windows it finds were
+    // already on screen, so nothing about them just appeared.
+    if (!m_backdropsSettled) {
+        m_backdropsSettled = true;
+        m_burstScreens.clear();
+        m_diveScreens.clear();
+    }
+}
+
+QPointF ThumbnailBloomEffect::burstPoint(LogicalOutput *screen) const
+{
+    if (!screen) {
+        return QPointF();
+    }
+    return m_screenFocus.value(screen, QRectF(effects->clientArea(MaximizeArea, screen)).center());
 }
 
 bool ThumbnailBloomEffect::isBackdrop(EffectWindow *w) const
@@ -1443,8 +1547,11 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         }
 
         // A thumbnail that has arrived back at its window is not a thumbnail
-        // any more. Click targets are placed by the relayout, not from here.
-        if (sameRect(state.rect.to, frameRect(w))) {
+        // any more, and neither is one that has dived into the point: there is
+        // nothing left of it to draw, and the window it belongs to is under
+        // whatever took the screen over. Click targets are placed by the
+        // relayout, not from here.
+        if (state.diving || sameRect(state.rect.to, frameRect(w))) {
             settledBack.push_back(w);
         }
     }
@@ -1477,6 +1584,13 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
     // or no size: its own place in the stacking order is under the backdrop, so
     // drawing it there would not show it at all. The anchor walk below then finds
     // that backdrop as the topmost window covering it and draws it right after.
+    //
+    // A thumbnail diving into the burst point is lifted for the whole of that
+    // trip as well, and into the moving group whatever its size: it is
+    // shrinking, so the size test never reaches it, and the window it is diving
+    // into is the one that has just taken the screen over, which is exactly the
+    // window the resting group is kept under. That is the one place where a
+    // lifted thumbnail is not being enlarged.
     //
     // They are ordered by that same size, most enlarged last, so the thumbnails
     // still on their way up cover the ones already on their way down.
@@ -1513,9 +1627,10 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
         }
         const bool resizing = state.lift != Lift::None
             && growth(state.rect.current, state.thumbBase) > 1.0 + liftEpsilon;
-        if (state.hovered || state.overBackdrop || resizing) {
-            LiftGroup &group
-                = state.hovered || resizing || w == active ? m_liftedAbove : m_liftedBelow;
+        const bool diving = state.lift == Lift::Dive;
+        if (state.hovered || state.overBackdrop || resizing || diving) {
+            LiftGroup &group = state.hovered || resizing || diving || w == active ? m_liftedAbove
+                                                                                  : m_liftedBelow;
             group.windows.push_back(w);
         }
     }
