@@ -1,0 +1,5 @@
+kde-thumbnail-bloom (@VERSION@~git@DATE@-1nano) unstable; urgency=low
+
+  * Upstream git snapshot build
+
+ -- Christopher Roy Bratusek <nano@jpberlin.de>  @BUILDDATE@
