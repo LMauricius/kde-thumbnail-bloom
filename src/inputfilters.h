@@ -69,11 +69,23 @@ public:
     /*! Whether a touchpad gesture sent from here is still running. */
     bool hasGesture() const;
     /*!
+     * Whether the pointer is on the window because of something the user did.
+     *
+     * Hovering a thumbnail is not that: the window is not under the pointer and
+     * has not been asked for anything, so it is told nothing at all and lights up
+     * no hover of its own. A click, a scroll or a gesture is, and from the first
+     * one of those the pointer stays on the window for as long as it is on the
+     * thumbnail, which is what keeps a scroll running smoothly.
+     */
+    bool isEngaged() const;
+    /*!
      * Whether the pointer is following the cursor after a click.
      *
      * A button can leave the window in a mode the pointer drives rather than
      * doing something and being over with, so from a click until the pointer is
      * taken off the window again it keeps being told where the pointer goes.
+     * Only a button does this; a scroll engages the window without moving its
+     * pointer around.
      */
     bool isFollowing() const;
 
@@ -133,6 +145,7 @@ private:
     QPointF m_pointerPos;
     Qt::MouseButtons m_buttons;
     bool m_gesture = false; //!< whether a touchpad gesture is being forwarded
+    bool m_engaged = false; //!< whether the user has asked the window for something
     bool m_follow = false; //!< whether a click has the pointer following the cursor
 
     QPointer<KWin::Window> m_touchWindow;
@@ -259,12 +272,6 @@ private:
      * InputDeviceHandlers and both are pointed at a shield the same way.
      */
     void redirect(KWin::InputDeviceHandler *device, const QPointF &pos);
-    /*!
-     * The same, for a caller that has already walked the stack: \a thumbnail is
-     * the one whose click target holds \a pos and \a hit what that walk found.
-     */
-    void redirect(KWin::InputDeviceHandler *device, const QPointF &pos,
-        const Thumbnail *thumbnail, const Hit &hit);
 
     /*!
      * Returns the topmost window at \a pos that is neither bloomed nor one of
@@ -290,17 +297,16 @@ private:
     static QPointF mapToWindow(const Thumbnail &thumbnail, const QPointF &pos);
 
     /*!
-     * Puts the forwarded pointer where \a pos says it belongs, or takes it away.
+     * Follows the pointer to \a pos, or takes it off the window it is on.
      *
-     * The pointer rests at the centre of the window for as long as its thumbnail
-     * is hovered: the window is not really under the pointer, so a position that
-     * moved with it would tell the client about a hover it is not having, while
-     * a pointer that is simply there is what makes a scroll land. A button
-     * changes that, since a press is at a place: from the press until the last
-     * button comes up the pointer follows along, at the matching spot of the
-     * window.
+     * Only ever one of those two: a hover never puts the pointer on a window in
+     * the first place, so there is nothing here to put it there. What did that
+     * was the click, the scroll or the gesture the user aimed at the thumbnail,
+     * and this keeps the pointer where that left it for as long as the cursor is
+     * on the thumbnail. A button is the one thing that moves it along, since a
+     * press is at a place.
      */
-    void updateForwardedPointer(const QPointF &pos, const Thumbnail *thumbnail);
+    void updateForwardedPointer(const QPointF &pos);
 
     /*! Starts a touchpad gesture on the thumbnail under the pointer, if there is one. */
     bool beginGesture();

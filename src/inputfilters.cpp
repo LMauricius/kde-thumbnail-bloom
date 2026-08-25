@@ -100,6 +100,8 @@ bool InputForwarder::hasButtons() const { return holdsPointer() && m_buttons != 
 
 bool InputForwarder::hasGesture() const { return holdsPointer() && m_gesture; }
 
+bool InputForwarder::isEngaged() const { return holdsPointer() && m_engaged; }
+
 bool InputForwarder::isFollowing() const { return holdsPointer() && m_follow; }
 
 void InputForwarder::enter(Window *window, const QPointF &globalPos)
@@ -137,6 +139,7 @@ void InputForwarder::enter(Window *window, const QPointF &globalPos)
     m_pointerPos = globalPos;
     m_buttons = Qt::NoButton;
     m_gesture = false;
+    m_engaged = false;
     m_follow = false;
 }
 
@@ -168,6 +171,7 @@ void InputForwarder::leave()
     m_pointerSurface.clear();
     m_buttons = Qt::NoButton;
     m_gesture = false;
+    m_engaged = false;
     m_follow = false;
 }
 
@@ -189,6 +193,7 @@ void InputForwarder::button(Qt::MouseButton button, PointerButtonState state)
         // can put the window into a mode the pointer drives from then on, which
         // is what Firefox's middle click autoscroll is, and a window left in one
         // of those with nothing moving inside it does nothing at all.
+        m_engaged = true;
         m_follow = true;
     } else {
         m_buttons &= ~button;
@@ -205,6 +210,12 @@ void InputForwarder::axis(const PointerAxisEvent *event)
     seat()->notifyPointerAxis(
         event->orientation, event->delta, event->deltaV120, event->source, event->inverted);
     seat()->notifyPointerFrame();
+
+    // The pointer stays on the window from here, so that a cursor drifting a
+    // little between two turns of the wheel does not take it away and put it
+    // back, which would break the scroll into pieces. It does not follow the
+    // cursor though: a scroll is aimed at the view, not at a spot in it.
+    m_engaged = true;
 }
 
 // A gesture that never began must not be ended, so each of these is guarded by
@@ -219,6 +230,7 @@ void InputForwarder::swipeBegin(int fingerCount)
     stampSeat();
     seat()->startPointerSwipeGesture(fingerCount);
     m_gesture = true;
+    m_engaged = true;
 }
 
 void InputForwarder::swipeUpdate(const QPointF &delta)
@@ -252,6 +264,7 @@ void InputForwarder::pinchBegin(int fingerCount)
     stampSeat();
     seat()->startPointerPinchGesture(fingerCount);
     m_gesture = true;
+    m_engaged = true;
 }
 
 void InputForwarder::pinchUpdate(const QPointF &delta, qreal scale, qreal rotation)
@@ -285,6 +298,7 @@ void InputForwarder::holdBegin(int fingerCount)
     stampSeat();
     seat()->startPointerHoldGesture(fingerCount);
     m_gesture = true;
+    m_engaged = true;
 }
 
 void InputForwarder::holdEnd(bool cancelled)
@@ -505,7 +519,7 @@ void ShieldFilter::setClickHandler(std::function<void(Window *)> handler)
     m_clicked = std::move(handler);
 }
 
-void ShieldFilter::updateForwardedPointer(const QPointF &pos, const Thumbnail *thumbnail)
+void ShieldFilter::updateForwardedPointer(const QPointF &pos)
 {
     Window *held = m_forwarder.pointerWindow();
 
@@ -521,33 +535,28 @@ void ShieldFilter::updateForwardedPointer(const QPointF &pos, const Thumbnail *t
         return;
     }
 
-    // A click keeps the pointer following even after the button comes up: what it
-    // started may be a mode the pointer drives rather than something the window
-    // has already done (Firefox's middle click autoscroll is the one everybody
-    // has), and there is no asking the client which it was. What ends it is the
-    // pointer leaving the thumbnail, and by then the thumbnail is the enlarged
-    // one, so that is what has to be left: the hold matches what is drawn under
-    // the pointer rather than the smaller rectangle underneath it.
-    if (m_forwarder.isFollowing()) {
-        const Thumbnail *followed = thumbnailOf(held);
-        if (followed && followed->region.contains(pos.toPoint())) {
-            m_forwarder.motion(mapToWindow(*followed, pos));
+    // Nothing here ever puts the pointer on a window, because hovering a
+    // thumbnail is not something the window is being asked for: it is not under
+    // the pointer, and telling it that it is would light up a hover of its own
+    // in a place nobody is looking at. What put the pointer there was a click, a
+    // scroll or a gesture aimed at the thumbnail, and it stays where that left it
+    // for as long as the cursor is on the thumbnail.
+    if (m_forwarder.isEngaged()) {
+        const Thumbnail *engaged = thumbnailOf(held);
+        if (engaged && engaged->region.contains(pos.toPoint())) {
+            // A click is the one thing the pointer follows along, since what it
+            // started may be a mode the pointer drives rather than something the
+            // window has already done (Firefox's middle click autoscroll is the
+            // one everybody has), and there is no asking the client which it was.
+            // A scroll only holds the pointer where it is.
+            if (m_forwarder.isFollowing()) {
+                m_forwarder.motion(mapToWindow(*engaged, pos));
+            }
             return;
         }
     }
 
-    if (!thumbnail) {
-        m_forwarder.leave();
-        return;
-    }
-
-    // Otherwise nothing moves the forwarded pointer. The window is not under the
-    // pointer at all, so a position travelling with it would tell the client
-    // about a hover it is not having; it rests in the middle of the window
-    // instead, which is where a scroll or a gesture is aimed anyway. Keeping it
-    // there for as long as the thumbnail is hovered, rather than putting it down
-    // for each event, is what makes a scroll run smoothly.
-    m_forwarder.enter(thumbnail->window, InputForwarder::windowCentre(thumbnail->window));
+    m_forwarder.leave();
 }
 
 bool ShieldFilter::beginGesture()
@@ -563,16 +572,6 @@ bool ShieldFilter::beginGesture()
 
 void ShieldFilter::redirect(InputDeviceHandler *device, const QPointF &pos)
 {
-    // One walk of the stack answers both halves: what is really under the
-    // pointer, and whether it is stacked above the thumbnail the click target
-    // belongs to, which is what makes that thumbnail invisible here.
-    const Thumbnail *thumbnail = thumbnailAt(pos);
-    redirect(device, pos, thumbnail, hitAt(pos, thumbnail ? thumbnail->window : nullptr));
-}
-
-void ShieldFilter::redirect(
-    InputDeviceHandler *device, const QPointF &pos, const Thumbnail *thumbnail, const Hit &hit)
-{
     // Only what one of ours caught is moved on: a shield, or a click target on a
     // part of its thumbnail that a window is painted over. Anything else is
     // already focused where it belongs.
@@ -581,6 +580,12 @@ void ShieldFilter::redirect(
         return;
     }
 
+    // One walk of the stack answers both halves, which matters on a path every
+    // pointer motion takes: what is really under the pointer, and whether it is
+    // stacked above the thumbnail the click target belongs to, which is what
+    // makes that thumbnail invisible here.
+    const Thumbnail *thumbnail = thumbnailAt(pos);
+    const Hit hit = hitAt(pos, thumbnail ? thumbnail->window : nullptr);
     const bool covered = thumbnail && hit.aboveStop;
     if (!m_shields.contains(pos.toPoint()) && !covered) {
         return;
@@ -601,16 +606,12 @@ void ShieldFilter::redirect(
 
 bool ShieldFilter::pointerMotion(PointerMotionEvent *event)
 {
-    // Motion arrives for every step the pointer takes, so the stacking order is
-    // walked once here and the answer handed to both of the jobs that need it.
-    const Thumbnail *thumbnail = thumbnailAt(event->position);
-    const Hit hit = hitAt(event->position, thumbnail ? thumbnail->window : nullptr);
-
     // Forwarding comes before the redirect, so that a pointer leaving a
     // thumbnail for a window below is taken off the client it was on before the
-    // next one is entered.
-    updateForwardedPointer(event->position, hit.aboveStop ? nullptr : thumbnail);
-    redirect(input()->pointer(), event->position, thumbnail, hit);
+    // next one is entered. It needs no walk of the stacking order of its own:
+    // where the pointer is only matters for the window it is already on.
+    updateForwardedPointer(event->position);
+    redirect(input()->pointer(), event->position);
     return false;
 }
 
@@ -648,7 +649,7 @@ bool ShieldFilter::pointerButton(PointerButtonEvent *event)
         return false;
     }
     m_forwarder.button(event->button, event->state);
-    updateForwardedPointer(event->position, usableThumbnailAt(event->position));
+    updateForwardedPointer(event->position);
     return true;
 }
 
