@@ -138,7 +138,8 @@ private:
         bool homing
             = false; //!< whether the running trip is the one back to the window's real geometry
         //! What the click target claims, in screen coordinates: the resting rectangle, or the
-        //! whole enlarged one once a click has landed on it, either way minus what covers it.
+        //! whole enlarged one once a click has landed on it, either way minus what covers it
+        //! (a panel, a popup, or the enlarged rectangle of the thumbnail holding the pointer).
         QRegion hitRegion;
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay;

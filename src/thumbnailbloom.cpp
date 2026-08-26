@@ -1247,17 +1247,19 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     state.hitRegion = QRegion(rect) - m_systemRegion;
 
     // The growth reaches over the neighbouring thumbnails, and two click targets
-    // on the same pixel have no defined order. This one is drawn over them while
-    // the pointer is on it, so it takes that area from them; what it must not do
-    // is swallow them, since the pointer has to be able to reach one by moving
-    // onto it. They keep their own resting rectangles. Only the ones that really
-    // are thumbnails: a window travelling home rests at its own geometry, and
-    // taking that out would carve a window sized hole in this one.
-    if (state.clicked) {
+    // on the same pixel have no defined order, so the overlap is cut out of one
+    // of the two. It is cut out of the neighbours: the grown thumbnail is drawn
+    // over them, and where it is drawn is where its input belongs. A neighbour
+    // that ends up covered whole loses its click target for as long as the hold
+    // lasts, which is right, since nothing of it can be seen. The pointer
+    // reaches it again by leaving the grown rectangle, which is what ends the
+    // hold in the first place.
+    // At most one thumbnail is ever held that way: the hold belongs to the
+    // pointer's visit, and only one thumbnail is hovered at a time.
+    if (!state.clicked) {
         for (const auto &[other, s] : m_states) {
-            if (other != w && !s.base.isEmpty() && !s.diving
-                && !sameRect(s.base, frameRect(other))) {
-                state.hitRegion -= s.base.toAlignedRect();
+            if (other != w && s.clicked && !s.hoverRect.isEmpty()) {
+                state.hitRegion -= s.hoverRect.toAlignedRect();
             }
         }
     }
@@ -1374,9 +1376,13 @@ void ThumbnailBloomEffect::updateShields()
         const QRect frame = w->frameGeometry().toAlignedRect();
         const auto sit = m_states.find(w);
 
-        // A non empty hit region is exactly what marks a window as bloomed: it is
-        // set by updateOverlay() and cleared as soon as the window travels home.
-        if (sit != m_states.end() && !sit->second.hitRegion.isEmpty()) {
+        // Where the window is drawn is what marks it as bloomed, not what its
+        // thumbnail has left to click: one can be left with no click target at
+        // all (buried under a panel, or covered whole by a grown neighbour) and
+        // is still painted away from its own geometry, so its real place still
+        // has to be shielded. Same test as updateOverlay()'s `leaving`.
+        if (sit != m_states.end() && !sit->second.diving
+            && !sameRect(sit->second.base, frameRect(w))) {
             BloomState &state = sit->second;
 
             // Every bloomed window has to be skipped when the input is handed

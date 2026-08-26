@@ -7,6 +7,7 @@
 #include "inputfilters.h"
 
 #include <input_event.h>
+#include <main.h>
 #include <pointer_input.h>
 #include <touch_input.h>
 #include <wayland/seat.h>
@@ -15,8 +16,34 @@
 #include <window.h>
 #include <workspace.h>
 
+#include <QMatrix4x4>
+#include <QVector3D>
+
 #include <algorithm>
 #include <chrono>
+
+namespace KWin {
+
+/*!
+ * Copy of KWin's own \c XwaylandInterface, which is not among the installed
+ * headers although \c kwinApp()->xwayland() returns one.
+ *
+ * Declaration order is the vtable order, so this has to stay exactly as
+ * upstream writes it (\c src/xwayland/xwayland_interface.h); nothing here is
+ * ever constructed, only called through the pointer the application hands out.
+ */
+class XwaylandInterface
+{
+public:
+    virtual bool dragMoveFilter(Window *target, const QPointF &position) = 0;
+    virtual AbstractDropHandler *xwlDropHandler() = 0;
+
+protected:
+    explicit XwaylandInterface() = default;
+    virtual ~XwaylandInterface() = default;
+};
+
+} // namespace KWin
 
 using namespace KWin;
 
@@ -49,6 +76,35 @@ static void stampSeat()
         s->setTimestamp(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()));
     }
+}
+
+/*!
+ * Returns what a drop on \a window has to be handed to, or null.
+ *
+ * Normally the data device of the client the surface belongs to. An Xwayland
+ * window has none of its own: everything an X client is dropped is translated by
+ * the Xwayland bridge, so the drop goes to the bridge's own handler instead.
+ */
+static AbstractDropHandler *dropHandlerFor(Window *window)
+{
+    SurfaceInterface *surface = window->surface();
+    SeatInterface *s = seat();
+    if (!surface || !s) {
+        return nullptr;
+    }
+
+    if (AbstractDropHandler *handler = s->dropHandlerForSurface(surface)) {
+        return handler;
+    }
+
+    // Asked of the connection the surface came in on rather than of the window's
+    // type, so that nothing has to be pulled in from KWin's X11 side just to
+    // recognise one.
+    if (surface->client() == waylandServer()->xWaylandConnection() && kwinApp()->xwayland()) {
+        return kwinApp()->xwayland()->xwlDropHandler();
+    }
+
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -918,8 +974,8 @@ bool DragDropFilter::dragOnto(const QPointF &pos, bool movePointer)
     }
 
     const ShieldFilter::Thumbnail *thumbnail = m_shields.usableThumbnailAt(pos);
-    SurfaceInterface *surface = thumbnail ? thumbnail->window->surface() : nullptr;
-    if (!surface) {
+    Window *window = thumbnail ? thumbnail->window : nullptr;
+    if (!window || !window->surface()) {
         // Not on a thumbnail: KWin's own filter takes the drag from here, and
         // whatever it points at is the right target.
         dwellOn(nullptr);
@@ -938,17 +994,44 @@ bool DragDropFilter::dragOnto(const QPointF &pos, bool movePointer)
     // The drop, though, is aimed at the middle of the window. The window is
     // somewhere else entirely and nothing about the thumbnail says where inside
     // it a drop belongs, so it is offered to the view as a whole, exactly like a
-    // scroll. Retargeting is what sends the leave and the enter, so it is done
-    // only when the drag actually changes windows; the motion afterwards is what
-    // keeps the client's own feedback alive, and it comes last so that the
-    // centre is the position that stands.
-    if (surface != s->dragSurface()) {
-        s->setDragTarget(s->dropHandlerForSurface(surface), surface,
-            InputForwarder::windowCentre(thumbnail->window), thumbnail->window->inputTransformation());
-    }
-    s->notifyDragMotion(InputForwarder::windowCentre(thumbnail->window));
+    // scroll. Everything from here on is what KWin's own drag filter does with
+    // the window it picked, only with the thumbnail's window in its place: a
+    // drop that reaches the client by any other route is one the client does not
+    // recognise.
+    const QPointF target = InputForwarder::windowCentre(window);
+    dwellOn(window);
 
-    dwellOn(thumbnail->window);
+    // Any drag an X client is on either end of belongs to the Xwayland bridge,
+    // which speaks XDND to that client and puts the offer up itself. It answers
+    // for the whole drag when it takes it, seat and all.
+    if (XwaylandInterface *xwl = kwinApp()->xwayland()) {
+        if (xwl->dragMoveFilter(window, target)) {
+            return true;
+        }
+    }
+
+    // The surface the drop belongs to is not always the window's own: a client
+    // that builds its content out of subsurfaces takes the drop on the one under
+    // the point, and the transformation has to carry that surface's offset, so
+    // that the coordinates the client is given are its own.
+    SurfaceInterface *surface
+        = window->surface()->mapToInputSurface(window->mapToLocal(target)).first;
+    if (!surface) {
+        return true;
+    }
+
+    // Retargeting is what sends the leave and the enter, and it carries the
+    // position with it; only a drag that stays on the same surface has anything
+    // left to say, which is the motion that keeps the client's own feedback
+    // alive.
+    if (surface != s->dragSurface()) {
+        QMatrix4x4 transformation = window->inputTransformation();
+        transformation.translate(-QVector3D(surface->mapToMainSurface(QPointF(0, 0))));
+        s->setDragTarget(dropHandlerFor(window), surface, target, transformation);
+    } else {
+        s->notifyDragMotion(target);
+    }
+
     return true;
 }
 
