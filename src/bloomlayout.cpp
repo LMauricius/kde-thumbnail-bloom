@@ -10,13 +10,114 @@
 
 #include <cmath>
 #include <optional>
+#include <qpoint.h>
 #include <vector>
+#include <ranges>
 
 namespace ThumbnailBloom {
 
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/*!Cuts out a rectangle mask from the area and stores the maximum remaining areas to output*/
+void cutOut(const QRect &area, const QRect &mask, std::vector<QRect> &out)
+{
+    if (!mask.contains(area)) {
+        if (!area.intersects(mask)) {
+            out.push_back(area);
+        } else {
+            if (area.left() < mask.left())
+                out.push_back({
+                    QPoint { area.left(), area.top() },
+                    QPoint { mask.left(), area.bottom() },
+                });
+            if (area.top() < mask.top())
+                out.push_back({
+                    QPoint { area.left(), area.top() },
+                    QPoint { area.right(), mask.top() },
+                });
+            if (area.right() > mask.right())
+                out.push_back({
+                    QPoint { mask.right(), area.top() },
+                    QPoint { area.right(), area.bottom() },
+                });
+            if (area.bottom() > mask.bottom())
+                out.push_back({
+                    QPoint { area.left(), mask.bottom() },
+                    QPoint { area.right(), area.bottom() },
+                });
+        }
+    }
+}
+
+static thread_local std::vector<QRect> rectsScratchpad;
+
+/*!
+ * A set of (possibly overlapping) rectangles describing a region of the screen.
+ * Unlike QRegion, each rectangle spans the maximum area inside the region,
+ * which makes ExtendedRegion more suitable for finding free areas.
+ */
+struct ExtendedRegion
+{
+    auto cbegin() const { return m_bands.cbegin(); }
+    auto cend() const { return m_bands.cend(); }
+    auto begin() const { return m_bands.cbegin(); }
+    auto end() const { return m_bands.cend(); }
+
+    ExtendedRegion() = default;
+    ExtendedRegion(ExtendedRegion &&) = default;
+    ExtendedRegion(const ExtendedRegion &) = default;
+    ExtendedRegion &operator=(ExtendedRegion &&) = default;
+    ExtendedRegion &operator=(const ExtendedRegion &) = default;
+
+    ExtendedRegion(const QRect &r)
+        : m_bands { r }
+    { }
+
+    ExtendedRegion &operator=(const QRect &r)
+    {
+        m_bands = { r };
+        return *this;
+    }
+
+    ExtendedRegion &operator-=(const QRect &mask)
+    {
+        auto &oldBands = rectsScratchpad;
+
+        oldBands = m_bands;
+        m_bands.clear();
+        for (auto &b : oldBands) {
+            cutOut(b, mask, m_bands);
+        }
+        return *this;
+    }
+
+    template <std::ranges::range M>
+    ExtendedRegion &operator-=(const M &mask)
+    {
+        for (auto &m : mask) {
+            *this -= m;
+        }
+        return *this;
+    }
+
+    ExtendedRegion operator-(const QRect &mask) &&
+    {
+        *this -= mask;
+        return std::move(*this);
+    }
+
+    template <std::ranges::range M>
+    ExtendedRegion operator-(const M &mask) &&
+    {
+        *this -= mask;
+        return std::move(*this);
+    }
+
+private:
+    std::vector<QRect> m_bands;
+};
 
 /*! Returns \a rect grown by \a margin on every side. */
 static QRect grown(const QRect &rect, int margin)
@@ -25,9 +126,14 @@ static QRect grown(const QRect &rect, int margin)
 }
 
 /*! Returns whether \a rect lies completely inside \a region. */
-static bool fitsInside(const QRegion &region, const QRect &rect)
+static bool fitsInside(const ExtendedRegion &region, const QRect &rect)
 {
-    return QRegion(rect).subtracted(region).isEmpty();
+    for (auto &r : region) {
+        if (r.contains(rect))
+            return true;
+    }
+
+    return false;
 }
 
 /*!
@@ -62,7 +168,7 @@ static int clamped(int value, int lower, int upper)
  * space in \a free allows. Returns nothing when \a size fits nowhere.
  */
 static std::optional<QRect> nearestFreeSlot(
-    const QRegion &free, const QSize &size, const QPointF &desiredCenter)
+    const ExtendedRegion &free, const QSize &size, const QPointF &desiredCenter)
 {
     std::optional<QRect> best;
     qreal bestDistance = 0;
@@ -80,12 +186,6 @@ static std::optional<QRect> nearestFreeSlot(
             clamped(desiredTopLeft.x(), band.left(), band.right() + 1 - size.width()),
             clamped(desiredTopLeft.y(), band.top(), band.bottom() + 1 - size.height()),
             size.width(), size.height());
-
-        // Bands are only single rows of the region, so a candidate that sticks
-        // out vertically into a neighbouring band still has to be checked.
-        if (!fitsInside(free, candidate)) {
-            continue;
-        }
 
         const qreal distance = distanceSquared(candidate.center(), desiredCenter);
         if (!best || distance < bestDistance) {
@@ -125,7 +225,7 @@ static qreal cornerDistanceSquared(const QRect &area, const QRect &rect)
  * small for anybody.
  */
 static std::optional<QRect> packedFreeSlot(
-    const QRegion &free, const QSize &size, const QRect &area)
+    const ExtendedRegion &free, const QSize &size, const QRect &area)
 {
     std::optional<QRect> best;
     qreal bestDistance = 0;
@@ -142,13 +242,6 @@ static std::optional<QRect> packedFreeSlot(
         for (const int left : lefts) {
             for (const int top : tops) {
                 const QRect candidate(left, top, size.width(), size.height());
-
-                // Bands are only single rows of the region, so a candidate that
-                // sticks out vertically into a neighbouring band still has to be
-                // checked.
-                if (!fitsInside(free, candidate)) {
-                    continue;
-                }
 
                 const qreal distance = cornerDistanceSquared(area, candidate);
                 if (!best || distance < bestDistance) {
@@ -177,7 +270,7 @@ struct SizedSlot
  * nearestFreeSlot() to where the window sits. Returns nothing when not even
  * the smallest size fits anywhere.
  */
-static std::optional<SizedSlot> searchSlot(const QRegion &free, const QRectF &geometry,
+static std::optional<SizedSlot> searchSlot(const ExtendedRegion &free, const QRectF &geometry,
     const QRect &area, qreal startScale, const LayoutOptions &options, bool packed)
 {
     // Shrink first, move second: try the starting size and only shrink further
@@ -323,14 +416,32 @@ static QRegion reservedRegion(const QList<LayoutWindow> &stack, const LayoutOpti
  * the mean of the scales the thumbnails ended up at, counting one that found no
  * room at all as LayoutOptions::minScale.
  */
-static QList<Placement> runPass(const QList<LayoutWindow> &stack, const std::vector<bool> &bloomed,
+static QList<Placement> runPass(const QList<LayoutWindow> &stack, std::vector<bool> &bloomed,
     const QRegion &seed, const QRect &area, const LayoutOptions &options, qreal startScale,
     bool packed, qreal *averageScale = nullptr)
 {
-    QRegion blocked = seed;
+    static thread_local ExtendedRegion uncovered;
+    static thread_local ExtendedRegion free;
+    uncovered = area;
+    uncovered -= seed;
+    free = area;
+    free -= seed;
+
     QList<Placement> placements;
     qreal scaleSum = 0;
     int count = 0;
+
+    // First build the region that is completely free of any relevant windows
+    // When possible, thumbnails will be placed here,
+    // rather than just over windows that are underneath them
+    for (int i = 0; i < stack.size(); ++i) {
+        const LayoutWindow &window = stack[i];
+        const QRect geometry = window.geometry.toAlignedRect();
+
+        if (!bloomed[i] && !window.backdrop) {
+            free -= grown(geometry, options.margin);
+        }
+    }
 
     for (int i = stack.size() - 1; i >= 0; --i) {
         const LayoutWindow &window = stack[i];
@@ -343,15 +454,20 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, const std::vec
         // a screen filled by one window still show thumbnails over it.
         if (!bloomed[i]) {
             if (!window.backdrop) {
-                blocked += grown(geometry, options.margin);
+                uncovered -= grown(geometry, options.margin);
             }
             continue;
         }
         ++count;
 
-        const QRegion free = QRegion(area).subtracted(blocked);
-        const std::optional<SizedSlot> slot
+        std::optional<SizedSlot> slot
             = searchSlot(free, window.geometry, area, startScale, options, packed);
+
+        // Since we couldn't put the thumbnail in the completely free area,
+        // allow placement over the windows it would cover anyways
+        if (!slot) {
+            slot = searchSlot(uncovered, window.geometry, area, startScale, options, packed);
+        }
 
         // Not even the smallest thumbnail fits: leave the window alone rather
         // than drop it somewhere it would be in the way. It stays where it is
@@ -360,13 +476,17 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, const std::vec
         // was not there.
         if (!slot) {
             scaleSum += options.minScale;
-            blocked += grown(geometry, options.margin);
+            auto g = grown(geometry, options.margin);
+            free -= g;
+            uncovered -= g;
             continue;
         }
 
         scaleSum += slot->scale;
         placements.append(Placement { window.id, QRectF(slot->rect) });
-        blocked += grown(slot->rect, options.margin);
+        auto g = grown(slot->rect, options.margin);
+        free -= g;
+        uncovered -= g;
     }
 
     if (averageScale) {
@@ -379,7 +499,7 @@ QList<Placement> computeLayout(
     const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
 {
     const QRect area = workArea.toAlignedRect();
-    const std::vector<bool> bloomed = selectBloomed(stack, options);
+    std::vector<bool> bloomed = selectBloomed(stack, options);
     const QRegion seed = reservedRegion(stack, options);
 
     // Sizing pass: the same walk, but packing every thumbnail into a corner
