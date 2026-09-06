@@ -9,8 +9,10 @@
 #include <QRegion>
 
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <qpoint.h>
+#include <qsize.h>
 #include <vector>
 #include <ranges>
 
@@ -120,9 +122,9 @@ private:
 };
 
 /*! Returns \a rect grown by \a margin on every side. */
-static QRect grown(const QRect &rect, int margin)
+static QRect grown(const QRectF &rect, int margin)
 {
-    return rect.adjusted(-margin, -margin, margin, margin);
+    return rect.toAlignedRect().adjusted(-margin, -margin, margin, margin);
 }
 
 /*! Returns whether \a rect lies completely inside \a region. */
@@ -163,45 +165,63 @@ static int clamped(int value, int lower, int upper)
     return std::max(lower, std::min(value, upper));
 }
 
+static qreal clamped(qreal value, qreal lower, qreal upper)
+{
+    return std::max(lower, std::min(value, upper));
+}
+
+constexpr qreal MIN_NOTICABLE_SIZE = 48.0;
+
 /*!
  * Places a \a size sized rectangle as close to \a desiredCenter as the free
  * space in \a free allows. Returns nothing when \a size fits nowhere.
+ * Otherwise returns a pair of the placement rect and cost
  */
-static std::optional<QRect> nearestFreeSlot(
-    const ExtendedRegion &free, const QSize &size, const QPointF &desiredCenter)
+static std::optional<std::pair<QRectF, qreal>> nearestPlacement(
+    const QRectF &band, const QRectF &geometry, const QSizeF &initialSize)
 {
-    std::optional<QRect> best;
-    qreal bestDistance = 0;
+    // Shrink (never grow) until the thumbnail fits the band, keeping the aspect ratio.
+    QSizeF size = initialSize;
+
+    if (size.width() > band.width()) {
+        size *= band.width() / size.width();
+    }
+    if (size.height() > band.height()) {
+        size *= band.height() / size.height();
+    }
 
     // Each free band is a rectangle of its own; the closest position within a
     // band is the desired one clamped to the band's placeable range.
-    for (const QRect &band : free) {
-        if (band.width() < size.width() || band.height() < size.height()) {
-            continue;
-        }
+    const qreal hRange = band.width() - geometry.width();
+    const qreal vRange = band.height() - geometry.height();
+    const qreal hLocus
+        = clamped(hRange > MIN_NOTICABLE_SIZE ? (geometry.x() - band.x()) / hRange
+                                              : (geometry.center().x() - band.x()) / band.width(),
+            0.0, 1.0);
+    const qreal vLocus
+        = clamped(vRange > MIN_NOTICABLE_SIZE ? (geometry.y() - band.y()) / vRange
+                                              : (geometry.center().y() - band.y()) / band.height(),
+            0.0, 1.0);
 
-        const QPoint desiredTopLeft(std::lround(desiredCenter.x() - size.width() / 2.0),
-            std::lround(desiredCenter.y() - size.height() / 2.0));
-        const QRect candidate(
-            clamped(desiredTopLeft.x(), band.left(), band.right() + 1 - size.width()),
-            clamped(desiredTopLeft.y(), band.top(), band.bottom() + 1 - size.height()),
-            size.width(), size.height());
+    const QRectF candidate {
+        band.x() + hLocus * (band.width() - size.width()),
+        band.y() + vLocus * (band.height() - size.height()),
+        size.width(),
+        size.height(),
+    };
 
-        const qreal distance = distanceSquared(candidate.center(), desiredCenter);
-        if (!best || distance < bestDistance) {
-            best = candidate;
-            bestDistance = distance;
-        }
-    }
+    const qreal distance = std::sqrt(distanceSquared(candidate.center(), geometry.center()));
+    const qreal areaShrink
+        = geometry.width() * geometry.height() / qreal(size.width() * size.height());
 
-    return best;
+    return std::pair { candidate, distance * areaShrink };
 }
 
 /*!
  * Squared distance from \a rect's centre to the nearest corner of \a area.
  * Only ever compared against another such value, so the square root is spared.
  */
-static qreal cornerDistanceSquared(const QRect &area, const QRect &rect)
+static qreal cornerDistanceSquared(const QRectF &area, const QRectF &rect)
 {
     const QPointF center = rect.center();
     const QPointF corners[]
@@ -218,47 +238,53 @@ static qreal cornerDistanceSquared(const QRect &area, const QRect &rect)
  * Places a \a size sized rectangle in whichever corner of the free space in
  * \a free lies closest to a corner of \a area. Returns nothing when \a size
  * fits nowhere.
+ * Otherwise returns a pair of the placement rect and cost
  *
  * This is the packing counterpart of nearestFreeSlot(): it ignores where the
  * window actually is and pushes the rectangle into a corner, so that what is
  * left over stays one large block in the middle rather than a set of gaps too
  * small for anybody.
  */
-static std::optional<QRect> packedFreeSlot(
-    const ExtendedRegion &free, const QSize &size, const QRect &area)
+static std::optional<std::pair<QRectF, qreal>> packedPlacement(
+    const QRectF &band, const QRectF &geometry, const QSizeF &initialSize)
 {
-    std::optional<QRect> best;
-    qreal bestDistance = 0;
+    QRectF best;
+    qreal bestDistance = std::numeric_limits<qreal>::max();
+
+    // Shrink (never grow) until the thumbnail fits the band, keeping the aspect ratio.
+    QSizeF size = initialSize;
+
+    if (size.width() > band.width()) {
+        size *= band.width() / size.width();
+    }
+    if (size.height() > band.height()) {
+        size *= band.height() / size.height();
+    }
 
     // Every free band contributes its own four corners; the winner is the
     // corner that ends up nearest to a corner of the work area.
-    for (const QRect &band : free) {
-        if (band.width() < size.width() || band.height() < size.height()) {
-            continue;
-        }
 
-        const int lefts[] = { band.left(), band.right() + 1 - size.width() };
-        const int tops[] = { band.top(), band.bottom() + 1 - size.height() };
-        for (const int left : lefts) {
-            for (const int top : tops) {
-                const QRect candidate(left, top, size.width(), size.height());
+    const qreal lefts[] = { band.left(), band.right() - size.width() };
+    const qreal tops[] = { band.top(), band.bottom() - size.height() };
+    for (const qreal left : lefts) {
+        for (const qreal top : tops) {
+            const QRectF candidate(left, top, size.width(), size.height());
 
-                const qreal distance = cornerDistanceSquared(area, candidate);
-                if (!best || distance < bestDistance) {
-                    best = candidate;
-                    bestDistance = distance;
-                }
+            const qreal distance = cornerDistanceSquared(geometry, candidate);
+            if (distance < bestDistance) {
+                best = candidate;
+                bestDistance = distance;
             }
         }
     }
 
-    return best;
+    return std::pair { best, bestDistance };
 }
 
 /*! A thumbnail rectangle together with the scale it was found at. */
 struct SizedSlot
 {
-    QRect rect;
+    QRectF rect;
     qreal scale = 0;
 };
 
@@ -271,28 +297,36 @@ struct SizedSlot
  * the smallest size fits anywhere.
  */
 static std::optional<SizedSlot> searchSlot(const ExtendedRegion &free, const QRectF &geometry,
-    const QRect &area, qreal startScale, const LayoutOptions &options, bool packed)
+    qreal startScale, const LayoutOptions &options, bool packed)
 {
-    // Shrink first, move second: try the starting size and only shrink further
-    // when that size finds no free spot. The loop always ends on minScale
-    // rather than on whatever the steps happen to land on, since startScale is
-    // no multiple of scaleStep and the smallest size must never be skipped.
-    qreal scale = std::max(options.minScale, startScale);
-    while (true) {
-        const QSize size(std::max(1, int(std::lround(geometry.width() * scale))),
-            std::max(1, int(std::lround(geometry.height() * scale))));
-        const std::optional<QRect> slot = packed
-            ? packedFreeSlot(free, size, area)
-            : nearestFreeSlot(free, size, geometry.center());
-        if (slot) {
-            return SizedSlot { *slot, scale };
-        }
+    // Shrink first, move second: try the starting size and only adjust it as needed to fit a spot
+    const QSizeF initialSize = geometry.size() * startScale;
 
-        if (scale <= options.minScale + 0.001) {
-            return {};
+    // Search for the best spot according to the cost.
+    // Whether we're using the 'packed' layout affects both the placement method and cost function
+    // After placement we will ensure that at least the minimum shrinking is performed.
+    // If a spot would require shrinking past the min scale, skip it.
+    std::optional<SizedSlot> bestSlot;
+    qreal bestCost = std::numeric_limits<qreal>::max();
+    for (const QRect &band : free) {
+        const std::optional<std::pair<QRectF, qreal>> placement = packed
+            ? packedPlacement(band, geometry, initialSize)
+            : nearestPlacement(band, geometry, initialSize);
+
+        if (placement) {
+            auto [candidate, cost] = placement.value();
+            qreal scale = candidate.width() / geometry.width();
+
+            if (cost >= bestCost || scale < options.minScale) {
+                continue;
+            }
+
+            bestSlot = { candidate, scale };
+            bestCost = cost;
         }
-        scale = std::max(options.minScale, scale - options.scaleStep);
     }
+
+    return bestSlot;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +411,7 @@ static std::vector<bool> selectBloomed(
  * afford. Zero would keep the old greedy behaviour; one would hand every
  * thumbnail the average outright.
  */
-static constexpr qreal AverageBlend = 0.33;
+static constexpr qreal AVERAGE_BLEND = 0.33;
 
 /*!
  * The part of the screen that is off limits to every thumbnail alike, before
@@ -461,12 +495,12 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, std::vector<bo
         ++count;
 
         std::optional<SizedSlot> slot
-            = searchSlot(free, window.geometry, area, startScale, options, packed);
+            = searchSlot(free, window.geometry, startScale, options, packed);
 
         // Since we couldn't put the thumbnail in the completely free area,
         // allow placement over the windows it would cover anyways
         if (!slot) {
-            slot = searchSlot(uncovered, window.geometry, area, startScale, options, packed);
+            slot = searchSlot(uncovered, window.geometry, startScale, options, packed);
         }
 
         // Not even the smallest thumbnail fits: leave the window alone rather
@@ -516,7 +550,7 @@ QList<Placement> computeLayout(
     // screen where everything fitted measures the configured size as its
     // average and is laid out exactly as before.
     const qreal startScale = std::max(options.minScale,
-        options.initialScale + AverageBlend * (averageScale - options.initialScale));
+        options.initialScale + AVERAGE_BLEND * (averageScale - options.initialScale));
 
     // Placement pass: the real one, each thumbnail as close to its window as
     // the free space allows.
