@@ -35,7 +35,8 @@ struct LayoutOptions
     qreal initialScale = 0.5; //!< first size a thumbnail is tried at
     qreal minScale = 0.15; //!< smallest size the search may fall back to
     qreal scaleStep = 0.05; //!< how much smaller each unsuccessful attempt gets
-    int margin = 8; //!< gap kept between a thumbnail and its surroundings
+    int margin = 8; //!< gap kept between a thumbnail and its surroundings, the edge of the work
+        //!< area included
     qreal minOccludedFraction = 0.08; //!< how much of a window must be covered before it blooms
 };
 
@@ -52,7 +53,8 @@ struct Placement
  * Computes thumbnail rectangles for the eligible windows of a single screen.
  *
  * \a stack holds the windows of that screen in stacking order, bottom-most
- * first. \a workArea is the area thumbnails may use.
+ * first. \a workArea is the area thumbnails may use, of which they keep
+ * LayoutOptions::margin clear along every edge.
  *
  * Selection comes first, placement second, so that the set of thumbnails does
  * not depend on where the previous ones happened to land. A window is turned

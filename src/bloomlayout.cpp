@@ -532,7 +532,11 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, std::vector<bo
 QList<Placement> computeLayout(
     const QList<LayoutWindow> &stack, const QRectF &workArea, const LayoutOptions &options)
 {
-    const QRect area = workArea.toAlignedRect();
+    // The margin is kept from whatever surrounds a thumbnail, and the edge of
+    // the screen surrounds it just as much as a window does: the whole
+    // placement therefore runs inside a work area shrunk by that same amount.
+    const QRect area = workArea.toAlignedRect().adjusted(
+        options.margin, options.margin, -options.margin, -options.margin);
     std::vector<bool> bloomed = selectBloomed(stack, options);
     const QRegion seed = reservedRegion(stack, options);
 
