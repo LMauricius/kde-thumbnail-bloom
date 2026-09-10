@@ -30,7 +30,9 @@
 #include <QHash>
 #include <QSet>
 #include <QTransform>
+#include <QMatrix4x4>
 #include <QVector2D>
+#include <QVector4D>
 
 #include <algorithm>
 #include <array>
@@ -188,39 +190,54 @@ static bool underBackdrop(const QList<LayoutWindow> &stack, const void *id, cons
     return false;
 }
 
-//! Width of the hover outline, in logical pixels.
-constexpr qreal outlineWidth = 2.0;
+//! Width of the outline of a thumbnail the pointer is on, in logical pixels.
+constexpr qreal hoverOutlineWidth = 2.0;
 
-//! Opacity below which the hover outline is not worth a draw call.
+//! Width of the outline of a thumbnail at rest, in logical pixels.
+constexpr qreal restOutlineWidth = 1.0;
+
+//! Strength below which the outline is not worth a draw call.
 constexpr qreal outlineEpsilon = 1e-2;
+
+/*!
+ * Fractions of a logical pixel the outline is measured in.
+ *
+ * The border shader takes its thickness as a whole number, and the width of the
+ * outline animates continuously between its two ends, so the whole thing is laid
+ * out in a fraction of a pixel rather than in one: a width of 1.5 is 96 of these
+ * and comes out at the width it asks for instead of snapping to 1 or 2.
+ */
+constexpr qreal outlineUnit = 64.0;
 
 //! How far past its resting growth of 1 a thumbnail must be drawn to count as lifted.
 constexpr qreal liftEpsilon = 1e-3;
 
 /*!
- * Returns the two triangles covering the quad \a corners, appended to \a vertices.
- *
- * The corners run clockwise from the top left, the order bendQuad() gives them
- * in, and nothing here assumes the shape is a rectangle: a bent outline is four
- * trapezoids.
+ * Returns \a from mixed with \a to at \a t, straight down the components,
+ * alpha included.
  */
-static void appendQuad(std::vector<QVector2D> &vertices, const BendQuad &corners)
+static QColor mixColors(const QColor &from, const QColor &to, qreal t)
 {
-    const QVector2D topLeft(corners[0]);
-    const QVector2D topRight(corners[1]);
-    const QVector2D bottomRight(corners[2]);
-    const QVector2D bottomLeft(corners[3]);
-    vertices.insert(
-        vertices.end(), { topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight });
+    const auto mix = [t](qreal a, qreal b) { return a + (b - a) * t; };
+    return QColor::fromRgbF(mix(from.redF(), to.redF()), mix(from.greenF(), to.greenF()),
+        mix(from.blueF(), to.blueF()), mix(from.alphaF(), to.alphaF()));
 }
 
-/*! Returns the outline colour of the current colour scheme. */
-static QColor outlineColor()
+/*! Returns the colour a thumbnail under the pointer is outlined in. */
+static QColor hoverOutlineColor()
 {
     // Read on every use: the colour scheme can change while the effect runs.
     return KColorScheme(QPalette::Active, KColorScheme::View)
         .decoration(KColorScheme::FocusColor)
         .color();
+}
+
+/*! Returns the colour a thumbnail at rest is outlined in. */
+static QColor restOutlineColor()
+{
+    // The colour the captions are drawn in, so that the outline and the title of
+    // a thumbnail read as the one frame around it.
+    return KColorScheme(QPalette::Active, KColorScheme::Window).foreground().color();
 }
 
 /*!
@@ -880,9 +897,10 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const Q
     // flattens out under the pointer, so a hovered window is seen head on, and it
     // is gone before the window is back where it really is.
     const qreal targetBend = targetCaption;
-    // The outline marks the pointer and nothing else, so it hangs on the hover
-    // alone: every other trip a thumbnail makes (blooming out, being relaid out,
-    // travelling home) leaves it at zero and draws no outline at all.
+    // Not the outline itself, which every thumbnail has, but how heavily it is
+    // drawn: the pointer alone thickens it and turns it to the focus colour, and
+    // every other trip a thumbnail makes (blooming out, being relaid out,
+    // travelling home) leaves it at the thin caption-coloured line.
     const qreal targetHighlight = state.hovered ? 1.0 : 0.0;
 
     // Which trip this is, which is what the lift follows: the size the thumbnail
@@ -1648,7 +1666,7 @@ QTransform ThumbnailBloomEffect::stateBend(
 
 QRectF ThumbnailBloomEffect::paintedArea(EffectWindow *w, const BloomState &state) const
 {
-    constexpr qreal pad = outlineWidth + 1.0;
+    constexpr qreal pad = hoverOutlineWidth + 1.0;
 
     const QRectF rect = state.rect.current;
     QRectF bounds = thumbnailBounds(w, rect);
@@ -2070,6 +2088,10 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
 
         Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
 
+        if (it != m_states.end()) {
+            drawOutline(renderTarget, viewport, w, it->second);
+        }
+
         drawCaption(renderTarget, viewport, w);
     }
 
@@ -2101,11 +2123,6 @@ void ThumbnailBloomEffect::drawLifted(
     }
     group.pending = false;
 
-    // Read once for the whole set rather than per outline: building a
-    // KColorScheme means reading and computing a whole palette, and every
-    // thumbnail here draws its outline in the same colour anyway.
-    const QColor outline = outlineColor();
-
     // Least enlarged first: the set is ordered that way, so the thumbnail the
     // pointer is growing ends up over the ones it is leaving behind.
     for (EffectWindow *w : group.windows) {
@@ -2125,16 +2142,16 @@ void ThumbnailBloomEffect::drawLifted(
         effects->drawWindow(renderTarget, viewport, w,
             PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
 
+        // The outline follows the thumbnail rather than the lift: every one of
+        // them is framed, and the highlight channel only decides how thick and
+        // in what colour. See drawOutline().
+        drawOutline(renderTarget, viewport, w, it->second);
+
         // The caption of a lifted thumbnail follows it here, so that it ends up
         // over the thumbnail rather than under it, like every other one does.
+        // Over the outline as well, the icon and the title being what a corner of
+        // the frame gives way to.
         drawCaption(renderTarget, viewport, w);
-
-        // The outline marks the hover, not the lift: it is drawn at the opacity
-        // of the highlight channel, which only the pointer ever raises. A
-        // thumbnail lifted for any other reason (one lying over a backdrop, one
-        // travelling home, one shrinking back after the pointer left) is at zero
-        // there and gets none.
-        drawOutline(renderTarget, viewport, w, it->second, outline);
     }
 }
 
@@ -2173,59 +2190,84 @@ void ThumbnailBloomEffect::drawCaption(
 }
 
 void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
-    const RenderViewport &viewport, EffectWindow *w, const BloomState &state,
-    const QColor &color) const
+    const RenderViewport &viewport, EffectWindow *w, const BloomState &state) const
 {
     const QRectF rect = state.rect.current;
-    const qreal opacity = state.highlight.current;
-    if (!effects->isOpenGLCompositing() || rect.isEmpty() || opacity <= outlineEpsilon) {
+
+    // How much of a thumbnail there is to frame, which is what the outline as a
+    // whole fades with. The caption channel is exactly that measure already (full
+    // at rest, gone on the way home and on a dive), and the hover empties it
+    // while raising the highlight, so the two are added rather than the larger of
+    // them taken: complementary channels crossing over would dip to a half at the
+    // middle of every hover and blink the outline.
+    const qreal strength = std::min(1.0, state.caption.current + state.highlight.current);
+    if (!effects->isOpenGLCompositing() || rect.isEmpty() || strength <= outlineEpsilon) {
         return;
     }
 
-    // The outline is turned with the thumbnail, through the very map its pixels
-    // go through: same angle, same direction, same frame, so the two cannot drift
-    // apart however the bend is animated. The inset is taken before the map and
-    // not after, which is what makes the border thinner where the thumbnail
-    // recedes, as the frame of a turned surface has to be.
-    const qreal width = std::min(outlineWidth, std::min(rect.width(), rect.height()) / 3.0);
-    const QTransform transform = stateBend(w, state, rect);
+    // The hover does not raise the outline out of nothing; it thickens the one
+    // that is there and turns it from the caption colour to the focus colour, so
+    // the frame of a thumbnail is drawn all the way through the animation and
+    // only ever changes weight.
+    const qreal blend = state.highlight.current;
+    const qreal thickness = restOutlineWidth + (hoverOutlineWidth - restOutlineWidth) * blend;
+    const QColor color = mixColors(m_restOutline, m_hoverOutline, blend);
+    const qreal width = std::min(thickness, std::min(rect.width(), rect.height()) / 3.0);
+    const int line = std::max(1, qRound(width * outlineUnit));
 
-    // The projection matrix of the viewport orthos over the render rect scaled by
-    // the output scale, so the vertices are logical screen coordinates multiplied
-    // by that scale (device pixels, but with the origin of the whole logical
-    // space, not of the output); on a screen scaled by 1 the two are the same, on
-    // any other one they are not.
-    const qreal scale = viewport.scale();
-    const auto corners = [&](const QRectF &box) {
-        return BendQuad { transform.map(box.topLeft()) * scale,
-            transform.map(box.topRight()) * scale, transform.map(box.bottomRight()) * scale,
-            transform.map(box.bottomLeft()) * scale };
-    };
-    const BendQuad outer = corners(rect);
-    const BendQuad inner = corners(rect.adjusted(width, width, -width, -width));
+    // The vertices are the thumbnail's own rectangle, in those fractions of a
+    // pixel and with the origin at its top left, and everything that happens to
+    // it on the way to the screen is carried by the projection instead: the turn
+    // it is drawn with, and then the scale from logical coordinates to device
+    // ones. That is what lets the shader measure against an upright box while the
+    // thumbnail is bent, and the coverage it takes from the derivative of that
+    // distance is a screen-space one, so the antialiasing follows the turn
+    // without anything here working it out. The perspective divide carries the
+    // vertex coordinates across the fragments correctly along with it, which is
+    // the very thing apply() has to cut its quads up for.
+    QMatrix4x4 mvp = viewport.projectionMatrix();
+    mvp.scale(viewport.scale(), viewport.scale());
+    mvp *= QMatrix4x4(stateBend(w, state, rect));
+    mvp.translate(rect.x(), rect.y());
+    mvp.scale(1.0 / outlineUnit, 1.0 / outlineUnit);
 
-    // One trapezoid per edge, between the outer corners and the inner ones.
-    std::vector<QVector2D> vertices;
-    vertices.reserve(24);
-    for (size_t i = 0; i < outer.size(); ++i) {
-        const size_t next = (i + 1) % outer.size();
-        appendQuad(vertices, { outer[i], outer[next], inner[next], inner[i] });
-    }
+    // The shader grows its box outwards by the thickness, so the box handed to it
+    // is the thumbnail less the line: that puts the outer edge of the line on the
+    // edge of the thumbnail and the line itself just inside it.
+    const QPointF half(rect.width() * outlineUnit / 2.0, rect.height() * outlineUnit / 2.0);
+    const QVector4D box(half.x(), half.y(), half.x() - line, half.y() - line);
+
+    // One quad over the whole thumbnail, a pixel wider all round: the coverage
+    // ramp reaches half a device pixel past the outer edge of the line, and a
+    // fragment the geometry does not cover is never asked about.
+    const QRectF span = QRectF(QPointF(0, 0), rect.size() * outlineUnit)
+                            .adjusted(-outlineUnit, -outlineUnit, outlineUnit, outlineUnit);
+    const QVector2D topLeft(span.left(), span.top());
+    const QVector2D topRight(span.right(), span.top());
+    const QVector2D bottomLeft(span.left(), span.bottom());
+    const QVector2D bottomRight(span.right(), span.bottom());
+    const std::array<QVector2D, 6> vertices
+        = { topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight };
 
     GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
     vbo->reset();
     vbo->setVertices(vertices);
 
-    // Premultiplied by hand: the uniform goes to the shader as it is, and the
-    // blend below expects the colour to carry its own alpha already.
-    const QColor faded = QColor::fromRgbF(color.redF() * color.alphaF() * opacity,
-        color.greenF() * color.alphaF() * opacity, color.blueF() * color.alphaF() * opacity,
-        color.alphaF() * opacity);
+    // Premultiplied by hand: the uniform goes to the shader as it is, the shader
+    // scales it by the coverage of the fragment, and the blend below expects the
+    // colour to carry its own alpha already.
+    const qreal alpha = color.alphaF() * strength;
+    const QColor faded = QColor::fromRgbF(
+        color.redF() * alpha, color.greenF() * alpha, color.blueF() * alpha, alpha);
 
-    ShaderBinder binder(ShaderTrait::UniformColor | ShaderTrait::TransformColorspace);
+    // Border alone, never with RoundedCorners: that trait masks everything down
+    // to the inside of the same box, which is precisely what the outline is not.
+    ShaderBinder binder(ShaderTrait::Border | ShaderTrait::TransformColorspace);
     GLShader *shader = binder.shader();
-    shader->setUniform(
-        GLShader::Mat4Uniform::ModelViewProjectionMatrix, viewport.projectionMatrix());
+    shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
+    shader->setUniform(GLShader::Vec4Uniform::Box, box);
+    shader->setUniform(GLShader::Vec4Uniform::CornerRadius, QVector4D());
+    shader->setUniform(GLShader::IntUniform::Thickness, line);
     shader->setUniform(GLShader::ColorUniform::Color, faded);
     shader->setColorspaceUniforms(
         ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
@@ -2248,6 +2290,12 @@ void ThumbnailBloomEffect::paintScreen(const RenderTarget &renderTarget,
     // the thumbnail that is stamped from inside the window pass, which is handed
     // a per-window region instead.
     m_paintRegion = deviceRegion;
+
+    // Read once for the whole pass rather than per outline: building a
+    // KColorScheme means reading and computing a whole palette, and every
+    // thumbnail of the frame is outlined between the same two colours.
+    m_restOutline = restOutlineColor();
+    m_hoverOutline = hoverOutlineColor();
 
     effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
 }

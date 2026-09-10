@@ -13,6 +13,7 @@
 #include <effect/offscreeneffect.h>
 #include <effect/timeline.h>
 
+#include <QColor>
 #include <QHash>
 #include <QPointer>
 #include <QRegion>
@@ -119,8 +120,8 @@ private:
         Animated<qreal> opacity; //!< thumbnail opacity, 1.0 when hovered or at home
         Animated<qreal> caption; //!< caption opacity the click target paints with
         Animated<qreal> bend; //!< bend strength, 0 flat, 1 full angle
-        Animated<qreal>
-            highlight; //!< hover outline opacity, 1 while the pointer is on the thumbnail
+        //! How far the outline is towards its hover weight, 1 while the pointer is on the thumbnail.
+        Animated<qreal> highlight;
         bool redirected
             = false; //!< whether the window is being painted through an offscreen texture
         bool hovered = false; //!< whether the pointer is on the thumbnail
@@ -300,18 +301,21 @@ private:
     void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         LiftGroup &group);
     /*!
-     * Draws the hover outline just inside the thumbnail of \a w, in logical
-     * screen coordinates.
+     * Draws the outline just inside the thumbnail of \a w, in logical screen
+     * coordinates.
      *
-     * The whole \a state is taken rather than a rectangle, because the outline
-     * is turned by the same bend as the pixels of the thumbnail and needs the
-     * strength this frame is drawn with, and it is drawn at the opacity of the
-     * state's highlight channel, so that it fades with the hover instead of
-     * blinking away with it. \a color is read once for the whole set of them, a
-     * palette being too much to build per outline.
+     * Every thumbnail is framed, and the state's highlight channel decides only
+     * how heavily: a thin caption-coloured line at rest, thickening and turning
+     * to the focus colour under the pointer, so the hover changes the weight of
+     * an outline that is already there instead of raising one out of
+     * transparency. The whole \a state is taken rather than a rectangle, because
+     * the outline is turned by the same bend as the pixels of the thumbnail and
+     * needs the strength this frame is drawn with. The two colours it mixes are
+     * read once per pass into m_restOutline and m_hoverOutline, a palette being
+     * too much to build per outline.
      */
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
-        KWin::EffectWindow *w, const BloomState &state, const QColor &color) const;
+        KWin::EffectWindow *w, const BloomState &state) const;
     /*! Puts the click target of \a w on its resting rectangle, or hides it. */
     void updateOverlay(KWin::EffectWindow *w, BloomState &state);
     /*!
@@ -422,6 +426,8 @@ private:
     TouchDragFilter m_touchDragFilter;
     DragDropFilter m_dragDropFilter;
     KWin::Region m_paintRegion; //!< device region the current pass repaints
+    QColor m_restOutline; //!< outline colour of a thumbnail at rest, read once per pass
+    QColor m_hoverOutline; //!< outline colour of a thumbnail under the pointer, ditto
     QRegion m_dirty; //!< logical area the running animations have to repaint
     KWin::EffectWindow *m_menuOwner
         = nullptr; //!< window whose menu is open, kept focused meanwhile
