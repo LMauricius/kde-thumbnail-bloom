@@ -10,8 +10,12 @@
 #include "inputfilters.h"
 
 #include <effect/effect.h>
-#include <effect/offscreeneffect.h>
 #include <effect/timeline.h>
+#include <opengl/glframebuffer.h>
+#include <opengl/glshader.h>
+#include <opengl/gltexture.h>
+#include <scene/item.h>
+#include <scene/itemgeometry.h>
 
 #include <QColor>
 #include <QHash>
@@ -41,12 +45,13 @@ class ThumbnailOverlay;
  * translated, and a transparent click target (ThumbnailOverlay) is put on top
  * of each finished thumbnail so that it can be clicked into focus.
  *
- * It is an OffscreenEffect because of the 3D bend: a resting thumbnail is drawn
- * turned away from the viewer, and nothing in WindowPaintData can express that.
- * A window redirected into a texture is deformed vertex by vertex instead, which
- * is what apply() does.
+ * Every bloomed window is drawn through a store of its own (drawWindow()): a
+ * texture holding the window at its real size, with a mip chain over it. That
+ * is what lets the thumbnail be bent, which nothing in WindowPaintData can
+ * express, and what keeps a thumbnail from aliasing, a downscale reading one
+ * texel out of the many each of its pixels covers.
  */
-class ThumbnailBloomEffect : public KWin::OffscreenEffect
+class ThumbnailBloomEffect : public KWin::Effect
 {
     Q_OBJECT
 
@@ -62,9 +67,31 @@ public:
     void paintWindow(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         KWin::EffectWindow *w, int mask, const KWin::Region &deviceRegion,
         KWin::WindowPaintData &data) override;
+    /*!
+     * Draws \a w out of its own offscreen store, bent and placed as \a data asks.
+     *
+     * The store is what the bend and the filtering both need: a window has to be
+     * a texture before its vertices can be moved one by one, and it has to carry
+     * a mip chain before it can be drawn smaller than it is without aliasing.
+     * A window with no store of its own (no state, no OpenGL, no room for the
+     * texture) is handed straight to the ordinary path and looks as it always
+     * did.
+     */
+    void drawWindow(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+        KWin::EffectWindow *w, int mask, const KWin::Region &deviceRegion,
+        KWin::WindowPaintData &data) override;
     void postPaintScreen() override;
 
     bool isActive() const override;
+    /*!
+     * Whether the screen has to be composited rather than scanned out directly.
+     *
+     * A window handed to the scanout hardware is shown on its own, with nothing
+     * drawn over it, so every thumbnail on that screen would disappear. The
+     * effect therefore holds the screen back for as long as it has a thumbnail
+     * to draw.
+     */
+    bool blocksDirectScanout() const override;
     int requestedEffectChainPosition() const override;
 
 private:
@@ -121,8 +148,14 @@ private:
         Animated<qreal> bend; //!< bend strength, 0 flat, 1 full angle
         //! How far the outline is towards its hover weight, 1 while the pointer is on the thumbnail.
         Animated<qreal> highlight;
-        bool redirected
-            = false; //!< whether the window is being painted through an offscreen texture
+        //! Whether the window is drawn through an offscreen store of its own.
+        bool snapshot = false;
+        //! The window at its real size, mip chained; made on the first draw that needs it.
+        std::unique_ptr<KWin::GLTexture> texture;
+        std::unique_ptr<KWin::GLFramebuffer> fbo; //!< what the store is drawn into
+        bool stale = true; //!< whether the window has changed since the store was drawn
+        //! Keeps the scene rendering the window while the store draws from it.
+        KWin::ItemEffect item;
         bool hovered = false; //!< whether the pointer is on the thumbnail
         //! Whether a click of the window's own has landed on the thumbnail since the pointer arrived.
         bool clicked = false;
@@ -259,9 +292,45 @@ private:
      * a grid small enough makes the pixels follow the perspective.
      */
     void apply(KWin::EffectWindow *window, int mask, KWin::WindowPaintData &data,
-        KWin::WindowQuadList &quads) override;
-    /*! Redirects \a w into an offscreen texture, or stops doing so, as \a redirected asks. */
-    void setRedirected(KWin::EffectWindow *w, BloomState &state, bool redirected);
+        KWin::WindowQuadList &quads);
+    /*!
+     * Gives \a w a store of its own, or takes it away, as \a wanted asks.
+     *
+     * The texture is the size of the whole window and there is one per bloomed
+     * window, so it is dropped the moment it stops being drawn from rather than
+     * kept against the next time. Wanted for every thumbnail, bend or no bend:
+     * one is drawn smaller than its window either way.
+     */
+    void setSnapshot(KWin::EffectWindow *w, BloomState &state, bool wanted);
+    /*!
+     * Brings the store of \a state up to date with \a w and says whether there
+     * is one to draw from.
+     *
+     * The window is drawn into it only when it has changed since the last time,
+     * so a still thumbnail costs nothing at all per frame, and the mip chain is
+     * built in the same breath: every level is made from the one above it, so
+     * the whole chain costs a third of the draw that has just happened.
+     */
+    bool refreshSnapshot(KWin::EffectWindow *w, BloomState &state);
+    /*!
+     * The shader a thumbnail is drawn with, built on the first draw that wants
+     * it, or nothing at all if the scene cannot compile it.
+     *
+     * Kept by the effect rather than by the window: it holds no state of its
+     * own, and one of it serves every thumbnail on every screen.
+     */
+    KWin::GLShader *filterShader();
+    /*!
+     * Draws the store of \a state where \a quads put it.
+     *
+     * What the scene does for an ordinary window, in the same terms: the stock
+     * shader, the same uniforms, the same blending and the same clipping, with
+     * the store standing in for the window's own texture.
+     */
+    void paintSnapshot(const KWin::RenderTarget &renderTarget,
+        const KWin::RenderViewport &viewport, KWin::EffectWindow *w, BloomState &state,
+        const KWin::Region &deviceRegion, const KWin::WindowPaintData &data,
+        const KWin::WindowQuadList &quads);
     /*!
      * The bend of \a state applied over \a rect: the configured angle scaled by
      * the animated strength, leaning towards the window's real place. \a rect is
@@ -463,6 +532,9 @@ private:
     bool m_showIcons = true;
     bool m_showTitles = true;
     qreal m_thumbnailOpacity = 0.9; //!< opacity of a thumbnail that is not hovered
+    //! Draws a thumbnail out of its store, averaging the texture over each pixel.
+    std::unique_ptr<KWin::GLShader> m_filterShader;
+    bool m_filterShaderBuilt = false; //!< whether building it has been tried at all
     qreal m_bendAngle
         = 15.0; //!< angle a resting thumbnail is turned by, in degrees; 0 keeps them flat
     LayoutOptions m_layoutOptions;

@@ -11,6 +11,7 @@
 
 #include <core/colorspace.h>
 #include <core/output.h>
+#include <core/pixelgrid.h>
 #include <core/rendertarget.h>
 #include <core/renderviewport.h>
 #include <cursor.h>
@@ -20,6 +21,8 @@
 #include <pointer_input.h>
 #include <wayland/seat.h>
 #include <wayland_server.h>
+#include <opengl/glutils.h>
+#include <scene/windowitem.h>
 #include <window.h>
 #include <workspace.h>
 #include <effect/effectwindow.h>
@@ -33,6 +36,7 @@
 
 #include <algorithm>
 #include <array>
+#include <span>
 #include <vector>
 
 using namespace KWin;
@@ -74,6 +78,167 @@ static qreal deviceScale(const EffectWindow *w)
 {
     const LogicalOutput *screen = w->screen();
     return screen && screen->scale() > 0 ? screen->scale() : 1.0;
+}
+
+/*!
+ * The fragment shader a thumbnail is drawn with.
+ *
+ * KWin's own shader for a window under the traits paintSnapshot() asks for,
+ * with one thing changed: where it takes a single sample of the texture, this
+ * averages the texture over exactly the piece of it the pixel being drawn
+ * covers. Everything after the sampling is the stock pipeline, included
+ * straight out of KWin's own shader sources, so a thumbnail is coloured,
+ * saturated and faded exactly as the window itself would have been.
+ *
+ * One sample is what makes a shrunk window shimmer. A thumbnail at a third of
+ * its window's size has each of its pixels standing for some nine of the
+ * window's, and a single sample picks one of the nine and throws the rest away:
+ * which one it picks moves as the thumbnail moves, so busy areas crawl, and
+ * letters come out thick in one place and thin in the next. Averaging the nine
+ * gives the pixel the colour it actually ought to be, and gives it that colour
+ * wherever the thumbnail happens to have got to, so a stem of a letter weighs
+ * the same at every step of an animation.
+ *
+ * The mip chain is what makes that affordable. Trilinear filtering already
+ * measures the pixel: it takes the very same derivatives and picks the level
+ * whose texels are about its size. What it does at that level is the trouble,
+ * since one bilinear sample is a tent across two texels wherever it happens to
+ * fall rather than the pixel's own footprint, and no level is ever exactly the
+ * right size, so it blends the two nearest and comes out soft. This picks the
+ * level itself, finest first, and then weighs the pixel out of it properly. A
+ * level is only ever reached for when the picture is too coarse for the taps
+ * below to weigh the footprint texel by texel, so a thumbnail at a sixth of
+ * its window or larger, which is every size the layout ever settles on and a
+ * good deal past it, is measured against the full sized picture and comes out
+ * exact. A smaller one
+ * borrows a level, where the texels in the middle of its footprint are already
+ * the averages it would have worked out and only the two at either end are
+ * taken as evenly filled.
+ */
+static constexpr char filterFragmentSource[] = R"GLSL(
+uniform sampler2D sampler;
+uniform vec4 modulation;
+in vec2 texcoord0;
+out vec4 fragColor;
+
+#include "saturation.glsl"
+#include "colormanagement.glsl"
+
+// How many pairs of texels one axis of a footprint may be read as, and how wide
+// a footprint that leaves room for: one of n texels falls across n + 1 of them
+// at worst, so four pairs weigh six texels exactly. A pixel is answered in four
+// samples at the sizes the layout settles on, in nine down to a quarter and in
+// sixteen at the very worst, and the level below is what keeps the count there
+// however small a thumbnail becomes.
+const int maxPairs = 4;
+const float maxTexels = float(2 * maxPairs - 2);
+
+/*
+ * Where to sample pair k of the footprint that runs from a to b, in texels, and
+ * how much of the footprint that sample stands for.
+ *
+ * The two texels of a pair are read as one bilinear sample placed between them,
+ * so that the hardware's own interpolation comes out at exactly the weights the
+ * two texels are covered by. A whole footprint is therefore read in half as
+ * many samples as it covers texels, and every texel is weighted by how much of
+ * the pixel it really falls under.
+ */
+vec2 footprintTap(float a, float b, int k)
+{
+    float first = floor(a) + float(2 * k);
+    float w0 = clamp(min(b, first + 1.0) - max(a, first), 0.0, 1.0);
+    float w1 = clamp(min(b, first + 2.0) - max(a, first + 1.0), 0.0, 1.0);
+    float weight = w0 + w1;
+    return vec2(first + 0.5 + (weight > 0.0 ? w1 / weight : 0.0), weight);
+}
+
+/* The texture averaged over the piece of it this pixel covers. */
+vec4 footprintAverage()
+{
+    // The pixel being drawn, pulled back into the picture. The derivatives are
+    // how far one pixel of the screen reaches into it in either direction,
+    // which is the whole answer: they carry the scale of the thumbnail, the
+    // bend, and whatever fraction of a pixel it has got to, without any of it
+    // being worked out here. The box around them is what gets averaged.
+    vec2 size = vec2(textureSize(sampler, 0));
+    vec2 reach = (abs(dFdx(texcoord0)) + abs(dFdy(texcoord0))) * size;
+
+    // The finest level of the chain whose texels the footprint falls across few
+    // enough of to be weighed one by one. Level zero for anything down to a
+    // sixth, and one level further down for every halving after that, so the
+    // work of a pixel never grows however small the thumbnail is drawn.
+    float deepest = floor(log2(max(size.x, size.y)));
+    float level = clamp(ceil(log2(max(reach.x, reach.y) / maxTexels)), 0.0, deepest);
+
+    // Everything from here on is in the texels of that level, which are asked
+    // for rather than halved out of the size above: a level of a picture whose
+    // sides are odd rounds down, and its texels are then not quite twice the
+    // ones before them.
+    int lod = int(level);
+    vec2 texels = vec2(textureSize(sampler, lod));
+    vec2 centre = texcoord0 * texels;
+
+    // Never narrower than one texel. A footprint of exactly one texel weighs
+    // the two texels it straddles by how far it laps onto each, which is
+    // ordinary bilinear interpolation, so a thumbnail drawn at its window's own
+    // size or larger comes out of this untouched.
+    vec2 extent = clamp(reach * texels / size, vec2(1.0), vec2(maxTexels + 1.0));
+    vec2 a = centre - 0.5 * extent;
+    vec2 b = centre + 0.5 * extent;
+
+    vec4 sum = vec4(0.0);
+    float total = 0.0;
+    for (int j = 0; j < maxPairs; ++j) {
+        vec2 tapY = footprintTap(a.y, b.y, j);
+        if (tapY.y <= 0.0) {
+            continue;
+        }
+        for (int i = 0; i < maxPairs; ++i) {
+            // Worked out here rather than kept in an array of its own: the
+            // loops are short and fixed, so the compiler unrolls them and the
+            // repeated halves fall together, while an array indexed by a
+            // counter can land in memory instead of in registers.
+            vec2 tapX = footprintTap(a.x, b.x, i);
+            float weight = tapX.y * tapY.y;
+            if (weight <= 0.0) {
+                continue;
+            }
+            // The level is named rather than left to the hardware, which would
+            // blend this one with the next and undo the point of choosing it.
+            sum += weight * textureLod(sampler, vec2(tapX.x, tapY.x) / texels, level);
+            total += weight;
+        }
+    }
+    return sum / total;
+}
+
+void main()
+{
+    vec4 result = footprintAverage();
+    result = encodingToNits(result, sourceNamedTransferFunction,
+        sourceTransferFunctionParams.x, sourceTransferFunctionParams.y);
+    result.rgb = (colorimetryTransform * vec4(result.rgb, 1.0)).rgb;
+    result = adjustSaturation(result);
+    result *= modulation;
+    result.rgb = doTonemapping(result.rgb);
+    result = nitsToDestinationEncoding(result);
+    fragColor = result;
+}
+)GLSL";
+
+/*!
+ * How many levels the mip chain of a texture \a size pixels large has.
+ *
+ * One for the picture itself and one for every halving of it down to a single
+ * pixel, which is the whole chain. The shader above reaches for a level only
+ * once a thumbnail is drawn below a quarter of its window's size, and the plain
+ * trilinear fallback reaches for all of them, so the tail is worth having
+ * either way: every level but the first is a quarter of the one above it, which
+ * makes the whole chain a third of the picture again.
+ */
+static int mipLevels(const QSize &size)
+{
+    return 1 + static_cast<int>(std::floor(std::log2(std::max(size.width(), size.height()))));
 }
 
 /*! Returns \a rect with every edge on the nearest whole physical pixel at \a scale. */
@@ -604,6 +769,14 @@ ThumbnailBloomEffect::~ThumbnailBloomEffect()
     for (auto &entry : m_states) {
         disconnect(entry.first, nullptr, this, nullptr);
     }
+
+    // The states hold the offscreen stores, and freeing a texture is a call into
+    // the driver like any other: it needs the context that made it, and nothing
+    // makes that context current for an effect being unloaded.
+    if (effects->isOpenGLCompositing() && !EglContext::currentContext()) {
+        effects->makeOpenGLContextCurrent();
+    }
+    m_filterShader.reset();
     const auto states = std::move(m_states);
 }
 
@@ -635,13 +808,10 @@ void ThumbnailBloomEffect::reconfigure(ReconfigureFlags flags)
 
     m_dragDropFilter.setActivationDelay(ThumbnailBloomConfig::dragActivationDelay());
 
-    // Redirecting a window into a texture costs a render pass per frame, so it
-    // is only done while there is a bend to draw; turning the angle down to zero
-    // hands every window that is already blooming back to the ordinary path.
+    // The store every window is drawn through has nothing to do with the angle:
+    // turning it down to zero leaves the thumbnails flat, drawn out of the very
+    // same texture.
     m_bendAngle = std::clamp<qreal>(ThumbnailBloomConfig::bendAngle(), 0.0, 60.0);
-    for (auto &[w, state] : m_states) {
-        setRedirected(w, state, m_bendAngle > 0.0);
-    }
 
     // The system's animation speed is already folded into animationTime().
     m_animationDuration
@@ -675,6 +845,12 @@ void ThumbnailBloomEffect::watch(EffectWindow *w)
     connect(w, &EffectWindow::windowDamaged, this, [this](EffectWindow *window) {
         const auto it = m_states.find(window);
         if (it != m_states.end()) {
+            // What the store holds is a frame of the window, and this is the
+            // only word there is that it has moved on. Nothing is drawn here:
+            // the store is brought up to date by the next paint that draws from
+            // it, so a window changing faster than the screen refreshes costs
+            // one redraw per frame rather than one per change.
+            it->second.stale = true;
             effects->addRepaint(RectF(paintedArea(window, it->second)));
         }
     });
@@ -904,13 +1080,13 @@ void ThumbnailBloomEffect::showInPlace(EffectWindow *w)
     BloomState &state = m_states.at(w);
     state.blocked = true;
 
-    // Every retarget hands the window back to the offscreen path the bend is
-    // drawn from, and a held window is retargeted by every relayout that comes
-    // along. Once the trip home is over there is no bend left to draw and no
-    // trip to draw it on, so the release advanceAnimations() made on arrival is
-    // held rather than undone frame after frame.
+    // Every retarget hands the window back a store, and a held window is
+    // retargeted by every relayout that comes along. Once the trip home is over
+    // the window is drawn where it really is and at its own size, so there is
+    // nothing left for a store to do: the release advanceAnimations() made on
+    // arrival is held rather than undone frame after frame.
     if (state.timeline.done()) {
-        setRedirected(w, state, false);
+        setSnapshot(w, state, false);
     }
 }
 
@@ -1035,14 +1211,11 @@ void ThumbnailBloomEffect::retarget(
         state.lift = Lift::None;
     }
 
-    // Nothing is bent unless it is painted through an offscreen texture, and
-    // that is decided per window rather than once, since a state can be inserted
-    // long after the effect was configured. It stays up for as long as the
-    // window blooms, flat moments included: dropping it whenever the bend
-    // reaches zero would hand the window back and forth between the offscreen
-    // path and the ordinary one on every hover, and the two do not compose a
-    // scaled down window quite alike.
-    setRedirected(w, state, m_bendAngle > 0.0);
+    // Every thumbnail is drawn through a store of its own, bend or no bend: one
+    // is drawn smaller than the window it shows either way, which is what the
+    // mip chain in the store is there for. It stays up for as long as the window
+    // blooms.
+    setSnapshot(w, state, true);
 
     // The click target follows the resting rectangle, not the animation: a
     // thumbnail can be hovered and clicked from the moment it sets off, but only
@@ -1293,7 +1466,7 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
                 RectF(ground.adjusted(-paintMargin, -paintMargin, paintMargin, paintMargin)));
         }
 
-        setRedirected(w, it->second, false);
+        setSnapshot(w, it->second, false);
 
         // The handles go with the state, so that nothing is left claiming a
         // surface that is on its way out.
@@ -1759,19 +1932,192 @@ bool ThumbnailBloomEffect::isMaximized(EffectWindow *w) const
 // Painting
 // ---------------------------------------------------------------------------
 
-void ThumbnailBloomEffect::setRedirected(EffectWindow *w, BloomState &state, bool redirected)
+void ThumbnailBloomEffect::setSnapshot(EffectWindow *w, BloomState &state, bool wanted)
 {
-    redirected = redirected && OffscreenEffect::supported();
-    if (state.redirected == redirected) {
+    // The software scene has no textures to hand out and no shaders to draw
+    // them with, so every thumbnail there is drawn the ordinary way: flat, and
+    // sampled once per pixel, as the whole effect was before.
+    wanted = wanted && effects->isOpenGLCompositing();
+    if (state.snapshot == wanted) {
         return;
     }
 
-    state.redirected = redirected;
-    if (redirected) {
-        redirect(w);
-    } else {
-        unredirect(w);
+    state.snapshot = wanted;
+    if (wanted) {
+        // A window whose real place is buried under everything else still has to
+        // be rendered, since the store is drawn from what the scene draws. This
+        // is what says so, and it is dropped along with the store.
+        state.item = ItemEffect(w->windowItem());
+        state.stale = true;
+        return;
     }
+
+    // The texture is the size of the whole window and every bloomed window has
+    // one, so it goes as soon as it stops being drawn from. Freeing a texture is
+    // a call into the driver like any other and needs the context that made it.
+    if (state.texture || state.fbo) {
+        if (!EglContext::currentContext()) {
+            effects->makeOpenGLContextCurrent();
+        }
+        state.fbo.reset();
+        state.texture.reset();
+    }
+    state.item = ItemEffect();
+}
+
+GLShader *ThumbnailBloomEffect::filterShader()
+{
+    // Built once, on the first frame that draws a thumbnail, since compiling a
+    // shader wants a current context and the effect is made long before there
+    // is one. A failure is remembered rather than tried again every frame: the
+    // shader leans on a few things an old scene may not have (the size of a
+    // texture, the derivatives of a coordinate, KWin's own colour sources), and
+    // a thumbnail is drawn from the mip chain instead when it cannot be had.
+    if (!m_filterShaderBuilt) {
+        m_filterShaderBuilt = true;
+        m_filterShader = ShaderManager::instance()->generateCustomShader(
+            ShaderTrait::MapTexture | ShaderTrait::Modulate | ShaderTrait::AdjustSaturation
+                | ShaderTrait::TransformColorspace,
+            QByteArray(), QByteArray(filterFragmentSource));
+    }
+    return m_filterShader.get();
+}
+
+bool ThumbnailBloomEffect::refreshSnapshot(EffectWindow *w, BloomState &state)
+{
+    // Everything the window paints, its shadow and its decoration along with it,
+    // at the size the screen it lives on draws it. The thumbnail is only ever
+    // smaller than that, so every pixel of the thumbnail comes out of a picture
+    // that holds more detail than it can show.
+    const qreal scale = deviceScale(w);
+    const QRectF content = snapToPixels(QRectF(w->expandedGeometry()), scale);
+    const QSize size = (content.size() * scale).toSize();
+    if (size.isEmpty()) {
+        state.fbo.reset();
+        state.texture.reset();
+        return false;
+    }
+
+    if (!state.texture || state.texture->size() != size) {
+        state.texture = GLTexture::allocate(GL_RGBA8, size, mipLevels(size));
+        if (!state.texture) {
+            state.fbo.reset();
+            return false;
+        }
+
+        state.texture->setFilter(GL_LINEAR_MIPMAP_LINEAR);
+        state.texture->setWrapMode(GL_CLAMP_TO_EDGE);
+        state.fbo = std::make_unique<GLFramebuffer>(state.texture.get());
+        state.stale = true;
+    }
+
+    if (!state.stale) {
+        return true;
+    }
+    state.stale = false;
+
+    // The scene draws the window into the store exactly as it would draw it onto
+    // the screen: untransformed, at its own size and its own place, with the
+    // viewport standing where the window does.
+    RenderTarget target(state.fbo.get());
+    RenderViewport viewport(content, scale, target, QPoint());
+    GLFramebuffer::pushFramebuffer(state.fbo.get());
+    glClearColor(0.0, 0.0, 0.0, 0.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    WindowPaintData data;
+    data.setOpacity(1.0);
+    effects->drawWindow(target, viewport, w, PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT,
+        Region::infinite(), data);
+
+    GLFramebuffer::popFramebuffer();
+
+    // Every level is halved from the one above it rather than made from the
+    // window again, so the chain costs a third of the draw that has just
+    // happened, and both only when the window has actually changed.
+    state.texture->bind();
+    state.texture->generateMipmaps();
+    state.texture->unbind();
+    return true;
+}
+
+void ThumbnailBloomEffect::paintSnapshot(const RenderTarget &renderTarget,
+    const RenderViewport &viewport, EffectWindow *w, BloomState &state, const Region &deviceRegion,
+    const WindowPaintData &data, const WindowQuadList &quads)
+{
+    // The filtering shader is the scene's own with the sampling replaced, so
+    // either of the two composes the store exactly as the window itself would
+    // have been: the same modulation, the same saturation and the same colour
+    // space, whatever the screen it is going onto turns out to want. They take
+    // the same uniforms for that reason.
+    GLShader *shader = filterShader();
+    if (!shader) {
+        shader = ShaderManager::instance()->shader(ShaderTrait::MapTexture
+            | ShaderTrait::Modulate | ShaderTrait::AdjustSaturation
+            | ShaderTrait::TransformColorspace);
+    }
+    ShaderBinder binder(shader);
+
+    const double scale = viewport.scale();
+
+    GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
+    vbo->reset();
+    vbo->setAttribLayout(std::span(GLVertexBuffer::GLVertex2DLayout), sizeof(GLVertex2D));
+
+    RenderGeometry geometry;
+    for (const WindowQuad &quad : quads) {
+        geometry.appendWindowQuad(quad, scale);
+    }
+    geometry.postProcessTextureCoordinates(state.texture->matrix(NormalizedCoordinates));
+
+    const auto map = vbo->map<GLVertex2D>(geometry.size());
+    if (!map) {
+        return;
+    }
+    geometry.copy(*map);
+    vbo->unmap();
+    vbo->bindArrays();
+
+    // The vertices are in window coordinates, at the window's own size: what
+    // makes a thumbnail of them is the matrix, which carries the scale and the
+    // translation applyTransform() put on the paint data.
+    const qreal rgb = data.brightness() * data.opacity();
+    const qreal alpha = data.opacity();
+
+    QMatrix4x4 mvp = viewport.projectionMatrix();
+    mvp.translate(std::round(w->x() * scale), std::round(w->y() * scale));
+
+    const auto toXYZ = renderTarget.colorDescription()->containerColorimetry().toXYZ();
+    shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp * data.toMatrix(scale));
+    shader->setUniform(GLShader::Vec4Uniform::ModulationConstant, QVector4D(rgb, rgb, rgb, alpha));
+    shader->setUniform(GLShader::FloatUniform::Saturation, data.saturation());
+    shader->setUniform(GLShader::Vec3Uniform::PrimaryBrightness,
+        QVector3D(toXYZ(1, 0), toXYZ(1, 1), toXYZ(1, 2)));
+    shader->setUniform(GLShader::IntUniform::TextureWidth, state.texture->width());
+    shader->setUniform(GLShader::IntUniform::TextureHeight, state.texture->height());
+    shader->setColorspaceUniforms(
+        ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
+
+    const bool clipping = deviceRegion != Region::infinite();
+    const Region clipRegion = clipping
+        ? viewport.transform().map(deviceRegion, renderTarget.transformedSize())
+        : Region::infinite();
+
+    if (clipping) {
+        glEnable(GL_SCISSOR_TEST);
+    }
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+    state.texture->bind();
+    vbo->draw(clipRegion, GL_TRIANGLES, 0, geometry.count(), clipping);
+    state.texture->unbind();
+
+    glDisable(GL_BLEND);
+    if (clipping) {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    vbo->unbindArrays();
 }
 
 QTransform ThumbnailBloomEffect::stateBend(
@@ -1982,12 +2328,13 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         // not the end of anything: it has to keep its state for as long as the
         // grab lasts, since that state is what draws it over the windows
         // covering it, and dropping it here would put it straight back under
-        // them. What it has no more use for is the offscreen texture, which
-        // would cost a render pass a frame on a window that is drawn flat, at
-        // its own size and in its own place; the trip that got it there is over,
+        // them. What it has no more use for is its store: the window is drawn
+        // flat, at its own size and in its own place, so there is neither a bend
+        // to draw nor a downscale to filter, and a texture the size of the
+        // window is a lot to hold for that. The trip that got it there is over,
         // so letting go of it now shows nothing.
         if (state.blocked) {
-            setRedirected(w, state, false);
+            setSnapshot(w, state, false);
             continue;
         }
 
@@ -2315,6 +2662,37 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     }
 }
 
+void ThumbnailBloomEffect::drawWindow(const RenderTarget &renderTarget,
+    const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion,
+    WindowPaintData &data)
+{
+    const auto it = m_states.find(w);
+    if (it == m_states.end() || !it->second.snapshot || !refreshSnapshot(w, it->second)) {
+        Effect::drawWindow(renderTarget, viewport, w, mask, deviceRegion, data);
+        return;
+    }
+
+    // One quad over everything the window paints, in window coordinates: the
+    // frame geometry at the origin, the shadow and the decoration reaching
+    // outside it. It covers the store corner for corner, and apply() cuts it
+    // into the grid the bend needs.
+    const QRectF expanded = snapToPixels(QRectF(w->expandedGeometry()), viewport.scale());
+    const QRectF frame = snapToPixels(QRectF(w->frameGeometry()), viewport.scale());
+    const QRectF visible(expanded.topLeft() - frame.topLeft(), expanded.size());
+
+    WindowQuad quad;
+    quad[0] = WindowVertex(visible.topLeft(), QPointF(0, 0));
+    quad[1] = WindowVertex(visible.topRight(), QPointF(1, 0));
+    quad[2] = WindowVertex(visible.bottomRight(), QPointF(1, 1));
+    quad[3] = WindowVertex(visible.bottomLeft(), QPointF(0, 1));
+
+    WindowQuadList quads;
+    quads.append(quad);
+    apply(w, mask, data, quads);
+
+    paintSnapshot(renderTarget, viewport, w, it->second, deviceRegion, data, quads);
+}
+
 bool ThumbnailBloomEffect::isLifted(EffectWindow *w) const
 {
     return isLifted(m_liftedBelow, w) || isLifted(m_liftedAbove, w);
@@ -2614,6 +2992,8 @@ void ThumbnailBloomEffect::postPaintScreen()
 }
 
 bool ThumbnailBloomEffect::isActive() const { return !m_states.empty(); }
+
+bool ThumbnailBloomEffect::blocksDirectScanout() const { return !m_states.empty(); }
 
 int ThumbnailBloomEffect::requestedEffectChainPosition() const { return 50; }
 
