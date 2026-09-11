@@ -6,13 +6,17 @@
 
 #pragma once
 
+#include <QColor>
 #include <QIcon>
 #include <QImage>
 #include <QPointF>
 #include <QRasterWindow>
 #include <QRectF>
+#include <QRegion>
 #include <QString>
 #include <QTimer>
+
+#include <array>
 
 namespace ThumbnailBloom {
 
@@ -62,12 +66,63 @@ protected:
 };
 
 /*!
+ * The frame drawn around a thumbnail.
+ *
+ * A window that paints rather than something the effect stamps on the screen,
+ * for the same reason the caption is one: the compositor draws it once per
+ * frame like any other surface, so it can neither be missed by a partial
+ * repaint nor drawn where the thumbnail is not, and it needs no shader of its
+ * own to be antialiased.
+ *
+ * The window is a store to paint frames into rather than the frame itself. The
+ * effect keeps it at the largest rectangle the running animation will draw,
+ * moves it onto the thumbnail every frame and draws it untransformed, and the
+ * line is painted into the part of it the thumbnail currently covers. Nothing
+ * is ever scaled that way, so the frame around a thumbnail grown under the
+ * pointer is as sharp as the one around a thumbnail at rest. The bend is
+ * painted rather than transformed for the same reason: the corners handed to
+ * setOutline() are already the bent ones, at the size of this very frame.
+ *
+ * It takes no input at all, the click target below it answering for the whole
+ * thumbnail.
+ */
+class OutlineOverlay : public OverlayWindow
+{
+    Q_OBJECT
+
+public:
+    OutlineOverlay();
+
+    /*!
+     * Sets the frame to draw: the four \a corners in window coordinates,
+     * clockwise from the top left, a line \a width logical pixels wide, in
+     * \a color, at \a strength of its full opacity.
+     *
+     * A change too small to be seen is dropped rather than repainted, since
+     * every frame of a hover offers a slightly different one.
+     */
+    void setOutline(
+        const std::array<QPointF, 4> &corners, qreal width, const QColor &color, qreal strength);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    std::array<QPointF, 4> m_corners {};
+    qreal m_width = 0.0;
+    QColor m_color;
+    qreal m_strength = 0.0;
+    QRect m_painted; //!< what the last paint drew into, in window coordinates
+    QSize m_paintedSize; //!< size of the store it drew into, a new one being a new buffer
+};
+
+/*!
  * The click target placed exactly on top of a thumbnail.
  *
  * It covers the thumbnail's rectangle and turns the gestures it swallows into
  * the three things a thumbnail can do: activate its window, drag it out of the
- * thumbnail, or open its window menu. The hover outline is drawn by the effect
- * instead, so that it stays in step with the animation.
+ * thumbnail, or open its window menu. The frame around the thumbnail is a window
+ * of its own (OutlineOverlay), since it has to follow the animation.
  *
  * It is also what carries the icon and the title of the window. Painting those
  * here rather than from the effect is what keeps them stable: the compositor

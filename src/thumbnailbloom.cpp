@@ -23,16 +23,13 @@
 #include <window.h>
 #include <workspace.h>
 #include <effect/effectwindow.h>
-#include <opengl/glutils.h>
 
 #include <KColorScheme>
 
 #include <QHash>
 #include <QSet>
 #include <QTransform>
-#include <QMatrix4x4>
 #include <QVector2D>
-#include <QVector4D>
 
 #include <algorithm>
 #include <array>
@@ -67,6 +64,52 @@ constexpr int bendSubdivisions = 16;
 
 /*! The frame geometry of \a w as a QRectF, the rectangle all the geometry here runs on. */
 static QRectF frameRect(const EffectWindow *w) { return QRectF(w->frameGeometry()); }
+
+/*!
+ * Returns how many physical pixels of the screen \a w is on one logical pixel
+ * covers, which is the grid everything a thumbnail comes to rest on is rounded
+ * to.
+ */
+static qreal deviceScale(const EffectWindow *w)
+{
+    const LogicalOutput *screen = w->screen();
+    return screen && screen->scale() > 0 ? screen->scale() : 1.0;
+}
+
+/*! Returns \a rect with every edge on the nearest whole physical pixel at \a scale. */
+static QRectF roundToDevice(const QRectF &rect, qreal scale)
+{
+    const auto snap = [scale](qreal value) { return std::round(value * scale) / scale; };
+    return QRectF(QPointF(snap(rect.left()), snap(rect.top())),
+        QPointF(snap(rect.right()), snap(rect.bottom())));
+}
+
+/*!
+ * Returns the smallest number of whole logical pixels that is a whole number of
+ * physical ones at \a scale.
+ *
+ * A window may only be put at whole logical pixels, so moving one in steps of
+ * this is the only way to keep it on the physical pixel grid: two logical pixels
+ * at a scale of 1.5, four at 1.25, one at every whole scale. A scale that does
+ * not come out even within eight of them is left at one, the fraction being far
+ * too small to be worth a larger buffer.
+ */
+static int deviceGridStep(qreal scale)
+{
+    for (int step = 1; step <= 8; ++step) {
+        const qreal pixels = step * scale;
+        if (std::abs(pixels - std::round(pixels)) < 1e-3) {
+            return step;
+        }
+    }
+    return 1;
+}
+
+/*! Returns \a value rounded down to a whole multiple of \a step. */
+static int floorToStep(qreal value, int step)
+{
+    return static_cast<int>(std::floor(value / step)) * step;
+}
 
 /*!
  * Returns the side the thumbnail of \a w resting at \a rect turns away towards.
@@ -191,23 +234,20 @@ static bool underBackdrop(const QList<LayoutWindow> &stack, const void *id, cons
 }
 
 //! Width of the outline of a thumbnail the pointer is on, in logical pixels.
-constexpr qreal hoverOutlineWidth = 2.0;
+constexpr qreal hoverOutlineWidth = 6.0;
 
 //! Width of the outline of a thumbnail at rest, in logical pixels.
 constexpr qreal restOutlineWidth = 1.0;
 
-//! Strength below which the outline is not worth a draw call.
+//! Strength below which there is no outline left to paint.
 constexpr qreal outlineEpsilon = 1e-2;
 
 /*!
- * Fractions of a logical pixel the outline is measured in.
- *
- * The border shader takes its thickness as a whole number, and the width of the
- * outline animates continuously between its two ends, so the whole thing is laid
- * out in a fraction of a pixel rather than in one: a width of 1.5 is 96 of these
- * and comes out at the width it asks for instead of snapping to 1 or 2.
+ * Margin kept around a thumbnail wherever its ground is measured, in logical
+ * pixels: the widest the outline is ever drawn, and a pixel for the coverage
+ * ramp that antialiases it.
  */
-constexpr qreal outlineUnit = 64.0;
+constexpr qreal paintMargin = hoverOutlineWidth + 1.0;
 
 //! How far past its resting growth of 1 a thumbnail must be drawn to count as lifted.
 constexpr qreal liftEpsilon = 1e-3;
@@ -463,6 +503,12 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
         if (m_menuOwner && !m_menuPopup && w->internalWindow()) {
             m_menuPopup = w;
         }
+        // The effect's own windows say nothing about the layout, and the frame
+        // store is moved by every step of every animation: watching that would
+        // run a layout pass a frame.
+        if (isOwnOverlay(w)) {
+            return;
+        }
         watch(w);
         scheduleRelayout();
     });
@@ -599,8 +645,7 @@ void ThumbnailBloomEffect::watch(EffectWindow *w)
     connect(w, &EffectWindow::windowDamaged, this, [this](EffectWindow *window) {
         const auto it = m_states.find(window);
         if (it != m_states.end()) {
-            effects->addRepaint(
-                RectF(thumbnailBounds(window, it->second.rect.current).adjusted(-1, -1, 1, 1)));
+            effects->addRepaint(RectF(paintedArea(window, it->second)));
         }
     });
 }
@@ -839,17 +884,26 @@ void ThumbnailBloomEffect::showInPlace(EffectWindow *w)
     }
 }
 
-void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const QPointF *burst)
+void ThumbnailBloomEffect::retarget(
+    EffectWindow *w, const QRectF &placement, const QPointF *burst)
 {
     const auto [it, inserted] = m_states.try_emplace(w);
     BloomState &state = it->second;
 
-    state.base = base;
-
     // A window travelling back to its real geometry is on its way to being an
     // ordinary window again, so it fades back to fully opaque just like the
     // hovered thumbnail does.
-    const bool thumbnail = !sameRect(base, frameRect(w));
+    const bool thumbnail = !sameRect(placement, frameRect(w));
+
+    // Rounded here and only here: what a thumbnail comes to rest on is what it
+    // is drawn at for as long as nothing moves, so an edge of it half a physical
+    // pixel off is resampled the whole time, while a step of an animation is
+    // gone before it can be looked at and rounding those would cost the motion
+    // its evenness. The trip home is left alone, its destination being where the
+    // window really is.
+    const qreal scale = deviceScale(w);
+    const QRectF base = thumbnail ? roundToDevice(placement, scale) : placement;
+    state.base = base;
 
     // A destination with no size at all is the dive: the thumbnail is heading
     // for the point its whole screen collapses into rather than for a place it
@@ -879,7 +933,8 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const Q
         state.thumbBase = base;
     }
     const QRectF target = state.hovered && !diving
-        ? grownRect(base, frameRect(w), QRectF(effects->clientArea(MaximizeArea, w)))
+        ? roundToDevice(
+              grownRect(base, frameRect(w), QRectF(effects->clientArea(MaximizeArea, w))), scale)
         : base;
     // What the thumbnail is actually drawn at once it gets there, which is what
     // a point on it has to be measured against: the picture the pointer is
@@ -956,8 +1011,11 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const Q
 
     // The click target follows the resting rectangle, not the animation: a
     // thumbnail can be hovered and clicked from the moment it sets off, but only
-    // where it is going to end up.
+    // where it is going to end up. The frame store is put up here as well, for a
+    // reason of its own: both are windows, and a window may only be shown or
+    // hidden from a relayout.
     updateOverlay(w, state);
+    updateOutline(w, state);
 
     if (inserted) {
         state.rect.snap(frameRect(w));
@@ -1022,8 +1080,19 @@ void ThumbnailBloomEffect::retarget(EffectWindow *w, const QRectF &base, const Q
         state.timeline.reset();
     }
 
-    m_animating = true;
-    effects->addRepaintFull();
+    // The ground this trip sets off from: where the thumbnail was last painted,
+    // where it stands at this moment (which is the real window, shadow and all,
+    // when a window is only just blooming out) and the resting rectangle its
+    // caption sits on. Everything past the first frame is asked for by the paint
+    // pass itself, which widens the damage of the frame by the ground every
+    // running animation moves over and then asks for the next frame over the
+    // same, so this is the one repaint a whole trip needs.
+    const QRectF ground
+        = thumbnailBounds(w, state.rect.current).united(state.painted).united(state.base);
+    if (!ground.isNull()) {
+        effects->addRepaint(
+            RectF(ground.adjusted(-paintMargin, -paintMargin, paintMargin, paintMargin)));
+    }
 }
 
 EffectWindow *ThumbnailBloomEffect::menuOwner() const
@@ -1179,12 +1248,24 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
     // flag is asked rather than the effect being told to unredirect blindly.
     const auto it = m_states.find(w);
     if (it != m_states.end()) {
+        // Nothing is going to draw the thumbnail there again, so the ground it
+        // was last painted over is repainted without it. Measured from the state
+        // rather than from the window, which may be on its way out: this also
+        // runs on windowClosed and windowDeleted.
+        const QRectF ground = it->second.painted.united(it->second.base);
+        if (!ground.isNull()) {
+            effects->addRepaint(
+                RectF(ground.adjusted(-paintMargin, -paintMargin, paintMargin, paintMargin)));
+        }
+
         setRedirected(w, it->second, false);
 
         // The handles go with the state, so that nothing is left claiming a
         // surface that is on its way out.
-        m_captionTargets.erase(it->second.overlay.get());
+        m_drawnOverlays.erase(it->second.overlay.get());
+        m_drawnOverlays.erase(it->second.outline.get());
         m_ownOverlays.erase(it->second.overlay.get());
+        m_ownOverlays.erase(it->second.outline.get());
         m_ownOverlays.erase(it->second.shield.get());
     }
 
@@ -1192,6 +1273,7 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
     if (!node.empty()) {
         for (OverlayWindow *window :
             { static_cast<OverlayWindow *>(node.mapped().overlay.release()),
+                static_cast<OverlayWindow *>(node.mapped().outline.release()),
                 node.mapped().shield.release() }) {
             if (window) {
                 window->disconnect();
@@ -1199,7 +1281,6 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
             }
         }
     }
-    effects->addRepaintFull();
 }
 
 void ThumbnailBloomEffect::startThumbnailMove(EffectWindow *w, const QPointF &pos, qint32 touchId)
@@ -1308,7 +1389,7 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
         // Registered before it is ever shown: from the moment it is, the paint
         // pass and the layout both have to recognise it for one of its own.
         m_ownOverlays.insert(state.overlay.get());
-        m_captionTargets.insert(state.overlay.get());
+        m_drawnOverlays.insert(state.overlay.get());
         connect(state.overlay.get(), &ThumbnailOverlay::activated, this,
             [w]() { effects->activateWindow(w); });
         connect(state.overlay.get(), &ThumbnailOverlay::dragStarted, this,
@@ -1484,11 +1565,12 @@ bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
 // for every window of the stack in the layout, so they go through a set of the
 // handles rather than through the states.
 
-bool ThumbnailBloomEffect::isCaptionTarget(EffectWindow *w) const
+bool ThumbnailBloomEffect::isDrawnOverlay(EffectWindow *w) const
 {
     const QWindow *handle = w->internalWindow();
-    // The shields paint nothing, so only the click targets are of interest.
-    return handle && m_captionTargets.contains(handle);
+    // The shields paint nothing, so only the click targets and the frames are
+    // of interest.
+    return handle && m_drawnOverlays.contains(handle);
 }
 
 bool ThumbnailBloomEffect::isOwnOverlay(EffectWindow *w) const
@@ -1666,8 +1748,6 @@ QTransform ThumbnailBloomEffect::stateBend(
 
 QRectF ThumbnailBloomEffect::paintedArea(EffectWindow *w, const BloomState &state) const
 {
-    constexpr qreal pad = hoverOutlineWidth + 1.0;
-
     const QRectF rect = state.rect.current;
     QRectF bounds = thumbnailBounds(w, rect);
 
@@ -1683,7 +1763,7 @@ QRectF ThumbnailBloomEffect::paintedArea(EffectWindow *w, const BloomState &stat
         }
     }
 
-    return bounds.adjusted(-pad, -pad, pad, pad);
+    return bounds.adjusted(-paintMargin, -paintMargin, paintMargin, paintMargin);
 }
 
 void ThumbnailBloomEffect::apply(
@@ -1744,33 +1824,44 @@ void ThumbnailBloomEffect::applyTransform(
 
 void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 {
+    // Read once for the whole pass rather than per thumbnail: building a
+    // KColorScheme means reading and computing a whole palette, and every frame
+    // of this pass is drawn between the same two colours. Before the animations
+    // advance, since that is where each frame is handed the colour it is at.
+    m_restOutline = restOutlineColor();
+    m_hoverOutline = hoverOutlineColor();
+
     const std::vector<EffectWindow *> settledBack = advanceAnimations(data);
     updateLift(data.screen);
 
-    // An empty damage is left alone throughout: no pass is drawing anything, and
-    // widening one would make a frame out of a pass that was going to paint
-    // nothing at all.
+    // The ground the animations have moved over since this screen last painted,
+    // in logical coordinates, which is what the scene expects here and maps into
+    // the damage of the pass itself. Widening the frame that is already
+    // happening is what pays for it; postPaintScreen() then asks for the next
+    // one, from wherever the thumbnails have got to by then.
+    //
+    // It is taken per screen and not per pass, because every screen paints a
+    // pass of its own and the animations advance in each of them: the position a
+    // screen last drew is one or two steps behind the one the last pass of some
+    // other screen left, and a frame that erased only the latter would leave the
+    // trailing edge of the thumbnail standing on it.
+    //
+    // An empty damage is left alone, and the ground is then kept rather than
+    // taken: no pass is drawing anything, widening one would make a frame out of
+    // a pass that was going to paint nothing at all, and nothing of what is owed
+    // to this screen has been repainted.
+    //
+    // Nothing is asked for on behalf of the lifted thumbnails, which are drawn
+    // out of turn after an anchor rather than at their own depth. What they need
+    // is not damage of their own but that the anchor be painted whenever the
+    // damage reaches them, and prePaintWindow() sees to that by marking it
+    // transformed. A thumbnail that has come to rest under the pointer therefore
+    // costs nothing: nothing on the screen is changing, so nothing is drawn.
     if (!data.paint.isEmpty()) {
-        // A lifted thumbnail is drawn out of turn, right after its anchor, so
-        // the two have to be painted in the same pass. Partial damage does not
-        // guarantee that: a repaint of the area the pointer moved through paints
-        // the windows below the thumbnail without ever reaching the anchor, and
-        // the thumbnail is erased wherever that happens. The whole screen is
-        // taken instead.
-        //
-        // Widening the damage of a pass that is happening anyway, rather than
-        // asking for a repaint once the pass is over, is what keeps a lifted
-        // thumbnail that has come to rest from holding the compositor at a full
-        // repaint per frame for as long as the pointer stays on it: nothing
-        // changes on the screen then, so nothing has to be drawn until something
-        // else damages it.
-        if ((!m_liftedBelow.windows.empty() || !m_liftedAbove.windows.empty()) && data.screen) {
-            data.paint |= Region(data.screen->geometry());
-        } else if (!m_dirty.isEmpty()) {
-            // The animations only need the ground they are moving over. What is
-            // asked for here is this frame; postPaintScreen() asks for the next
-            // one, which widens the damage again from wherever they got to.
-            data.paint |= Region(m_dirty);
+        QRegion &pending = m_pending[data.screen];
+        if (!pending.isEmpty()) {
+            data.paint |= Region(pending);
+            pending = QRegion();
         }
     }
 
@@ -1787,12 +1878,19 @@ void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 
 std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePaintData &data)
 {
-    m_animating = false;
-    m_dirty = QRegion();
+    m_moved = QRegion();
 
     std::vector<EffectWindow *> settledBack;
     for (auto &[w, state] : m_states) {
         const QRectF before = state.painted;
+
+        // Asked before the step rather than after: a timeline that was already
+        // finished cannot move the thumbnail, and one that finishes on this step
+        // has moved it as far as any other step did. A thumbnail resting for
+        // minutes therefore adds nothing to the damage, which is what keeps the
+        // repaint of an unrelated corner of the screen from redrawing every
+        // thumbnail on it.
+        const bool moving = !state.timeline.done();
 
         state.timeline.advance(data.view);
         const qreal progress = state.timeline.value();
@@ -1804,21 +1902,28 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         if (state.overlay) {
             state.overlay->setCaptionOpacity(state.caption.current);
         }
+        refreshOutline(w, state);
 
         state.painted = paintedArea(w, state);
 
-        if (!state.timeline.done()) {
-            m_animating = true;
+        // Where the thumbnail was and where it now is, so that the frame erases
+        // the one and draws the other. The two are taken together rather than as
+        // a pair, which covers the ground between them as well: a thumbnail
+        // moves in a straight line, and a step large enough to leave a gap would
+        // otherwise leave a trail in it. The resting rectangle comes along
+        // because the caption is painted there, and the hover can have the
+        // thumbnail itself elsewhere.
+        //
+        // The frame a trip ends on is measured like every other one, and before
+        // the state is dropped rather than after: that step moves the thumbnail
+        // as far as the one before it did, and what it leaves behind is painted
+        // by this pass or by nothing at all.
+        if (moving) {
+            m_moved += before.united(state.painted).toAlignedRect();
+            m_moved += state.base.toAlignedRect();
+        }
 
-            // Where the thumbnail was and where it now is, so that the frame
-            // erases the one and draws the other. The two are taken together
-            // rather than as a pair, which covers the ground between them as
-            // well: a thumbnail moves in a straight line, and a step large
-            // enough to leave a gap would otherwise leave a trail in it. The
-            // resting rectangle comes along because the caption is painted
-            // there, and the hover can have the thumbnail itself elsewhere.
-            m_dirty += before.united(state.painted).toAlignedRect();
-            m_dirty += state.base.toAlignedRect();
+        if (!state.timeline.done()) {
             continue;
         }
 
@@ -1846,6 +1951,21 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
 
         if (state.diving || state.homing) {
             settledBack.push_back(w);
+        }
+    }
+
+    // Owed to every screen, including the one about to paint: what a screen has
+    // to repaint is the whole chain of steps since it last drew, and each step
+    // covers the ground between two consecutive positions, so the union of them
+    // covers every position the thumbnail was drawn at in between. The screens
+    // that have gone are dropped, a region nobody will ever paint being carried
+    // for ever otherwise.
+    if (!m_moved.isEmpty()) {
+        const QList<LogicalOutput *> screens = effects->screens();
+        std::erase_if(
+            m_pending, [&screens](const auto &entry) { return !screens.contains(entry.first); });
+        for (LogicalOutput *screen : screens) {
+            m_pending[screen] += m_moved;
         }
     }
 
@@ -1960,16 +2080,19 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
     // thumbnails, and not after the whole screen: everything painted later (the
     // popup layer the outlines live in, and the cursor) keeps painting over them.
     //
-    // The click targets count as covering windows here, even though they are
-    // above the whole stack rather than at a place in it: they are the surfaces
-    // the captions are painted on, and the thumbnail that grew over its
-    // neighbours has to cover their captions as well. Its own caption is faded
-    // out under the pointer, so nothing of it is lost by drawing over it.
+    // Covering is measured against what each window puts on the screen rather
+    // than against the rectangle it occupies (footprint(), below), which for a
+    // bloomed window is its thumbnail and the rectangle its caption is painted
+    // on. That is what makes the neighbour a thumbnail grew across an anchor:
+    // the enlarged one has to cover its picture and its caption alike, and the
+    // real window it belongs to is buried somewhere else and covers nothing. The
+    // caption of the enlarged thumbnail is faded out under the pointer, so
+    // nothing of it is lost the other way round.
     //
-    // Anchoring to a window the thumbnail overlaps also keeps the two in the
-    // same repaint: a window that does not intersect the thumbnail may be left
-    // out of a partial repaint, and the anchor has to be painted for the
-    // thumbnail to be drawn at all.
+    // The anchor is then painted whatever this pass is repainting, since
+    // prePaintWindow() marks it transformed: a window is otherwise left out of a
+    // partial repaint that does not touch the rectangle it occupies, and the
+    // whole group would go with it.
     //
     // When nothing covers any of them they are already the topmost windows, but
     // they still have to be drawn in one place to be ordered among themselves,
@@ -1987,23 +2110,40 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
             return std::ranges::any_of(passed, [&](const QRect &r) { return frame.intersects(r); });
         };
 
+        // What a window puts on the screen, which is what covering means here.
+        // For a bloomed one that is its thumbnail and the caption on the
+        // rectangle the layout gave it, never the rectangle it really occupies:
+        // a thumbnail is drawn over the neighbour it grew across, and the real
+        // window behind that neighbour is buried somewhere else entirely and
+        // covers nothing. Measured against the real rectangle, the neighbour
+        // would not be recognised as covering anything, the group would be
+        // anchored below it, and the neighbour's own thumbnail, outline and
+        // caption would then be painted over the enlarged one.
+        const auto footprint = [this](EffectWindow *w) -> QRect {
+            const auto it = m_states.find(w);
+            if (it != m_states.end()) {
+                return it->second.painted.united(it->second.base).toAlignedRect();
+            }
+            return w->frameGeometry().toRect();
+        };
+
         for (EffectWindow *w : effects->stackingOrder()) {
             ++index;
 
             // The stacking order runs bottom to top, so only what follows covers
             // the thumbnail; anything below it is already covered.
             if (isLifted(m_liftedBelow, w)) {
-                passedBelow.push_back(m_states.at(w).rect.current.toAlignedRect());
+                passedBelow.push_back(footprint(w));
                 fallbackBelow = w;
                 fallbackIndex = index;
                 m_liftedBelow.anchor = w;
                 belowIndex = index;
             } else if (isLifted(m_liftedAbove, w)) {
-                passedAbove.push_back(m_states.at(w).rect.current.toAlignedRect());
+                passedAbove.push_back(footprint(w));
                 m_liftedAbove.anchor = w;
                 aboveIndex = index;
             } else if (isRelevant(w) && inPass(w)) {
-                const QRect frame = w->frameGeometry().toRect();
+                const QRect frame = footprint(w);
 
                 // The resting group stops short of the active window itself,
                 // which is the whole point of the split. Only of that one
@@ -2059,6 +2199,20 @@ void ThumbnailBloomEffect::prePaintWindow(
         data.setTranslucent();
     }
 
+    // The anchor of a lift group is where the thumbnails of that group are
+    // drawn, so it may not be left out of the pass on account of its own
+    // geometry: an ordinary window is painted only where the damage meets the
+    // rectangle it occupies, and a repaint that touches a lifted thumbnail need
+    // touch nothing of the window it is drawn over. Marked transformed, the
+    // anchor is painted whenever anything of the damage is left under it at all,
+    // which is exactly when the group has something to draw; where the damage is
+    // covered by opaque windows above the anchor, nothing drawn after it could
+    // be seen anyway. The cost is that it stops occluding the windows below it,
+    // which is one window's worth of overdraw inside the damage and no more.
+    if (w == m_liftedBelow.anchor || w == m_liftedAbove.anchor) {
+        data.setTransformed();
+    }
+
     Effect::prePaintWindow(view, w, data);
 }
 
@@ -2072,7 +2226,7 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     // again right after the window it belongs to, which is what gives the
     // caption the depth of its own thumbnail: from there the compositor covers
     // the two together, and nothing has to be worked out from geometry.
-    if (isCaptionTarget(w)) {
+    if (isDrawnOverlay(w)) {
         return;
     }
 
@@ -2088,20 +2242,27 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
 
         Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
 
+        // The region the window was painted with is the clip of everything
+        // stamped after it, the outline and the caption alike: it is the damage
+        // of the pass less what opaque windows above this one cover, so what is
+        // drawn here reaches exactly as far as the thumbnail itself did. Taking
+        // the damage of the whole pass instead would draw over ground this
+        // window is buried under, and taking no region at all would draw over
+        // pixels the frame never cleared.
         if (it != m_states.end()) {
-            drawOutline(renderTarget, viewport, w, it->second);
+            drawOutline(renderTarget, viewport, it->second, deviceRegion);
         }
 
-        drawCaption(renderTarget, viewport, w);
+        drawCaption(renderTarget, viewport, w, deviceRegion);
     }
 
     // Always in this order, which is what puts the hovered thumbnail over the
     // rest even when the two groups share an anchor.
     if (w == m_liftedBelow.anchor) {
-        drawLifted(renderTarget, viewport, m_liftedBelow);
+        drawLifted(renderTarget, viewport, m_liftedBelow, deviceRegion);
     }
     if (w == m_liftedAbove.anchor) {
-        drawLifted(renderTarget, viewport, m_liftedAbove);
+        drawLifted(renderTarget, viewport, m_liftedAbove, deviceRegion);
     }
 }
 
@@ -2115,8 +2276,8 @@ bool ThumbnailBloomEffect::isLifted(const LiftGroup &group, EffectWindow *w)
     return std::ranges::find(group.windows, w) != group.windows.end();
 }
 
-void ThumbnailBloomEffect::drawLifted(
-    const RenderTarget &renderTarget, const RenderViewport &viewport, LiftGroup &group)
+void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget,
+    const RenderViewport &viewport, LiftGroup &group, const Region &deviceRegion)
 {
     if (!group.pending) {
         return;
@@ -2131,32 +2292,35 @@ void ThumbnailBloomEffect::drawLifted(
             continue;
         }
 
-        // The region is the clip of the draw, and it has to be the damage of the
-        // whole pass. The region the anchor was painted with is clipped to that
-        // window's own area for an opaque window, which cuts the thumbnail down to
-        // the part overlapping it; an infinite region has the opposite problem, since
-        // painting outside the damage blends the translucent parts of the thumbnail
-        // over pixels that were never cleared, so the shadow darkens frame by frame.
+        // The region is the clip of the draw, and it is the one the anchor was
+        // painted with: the damage of the pass less what opaque windows above
+        // the anchor cover, which is precisely the ground a thumbnail drawn
+        // after it can be seen on. The anchor is marked transformed in
+        // prePaintWindow(), so that region is not cut down to the rectangle the
+        // anchor itself occupies. An infinite region would have the opposite
+        // problem, since painting outside the damage blends the translucent
+        // parts of the thumbnail over pixels that were never cleared, and the
+        // shadow would darken frame by frame.
         WindowPaintData data;
         applyTransform(w, it->second, data);
         effects->drawWindow(renderTarget, viewport, w,
-            PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
+            PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
 
         // The outline follows the thumbnail rather than the lift: every one of
         // them is framed, and the highlight channel only decides how thick and
-        // in what colour. See drawOutline().
-        drawOutline(renderTarget, viewport, w, it->second);
+        // in what colour. See refreshOutline().
+        drawOutline(renderTarget, viewport, it->second, deviceRegion);
 
         // The caption of a lifted thumbnail follows it here, so that it ends up
         // over the thumbnail rather than under it, like every other one does.
         // Over the outline as well, the icon and the title being what a corner of
         // the frame gives way to.
-        drawCaption(renderTarget, viewport, w);
+        drawCaption(renderTarget, viewport, w, deviceRegion);
     }
 }
 
-void ThumbnailBloomEffect::drawCaption(
-    const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w)
+void ThumbnailBloomEffect::drawCaption(const RenderTarget &renderTarget,
+    const RenderViewport &viewport, EffectWindow *w, const Region &deviceRegion)
 {
     const auto it = m_states.find(w);
     if (it == m_states.end()) {
@@ -2181,135 +2345,174 @@ void ThumbnailBloomEffect::drawCaption(
 
     // Drawn untransformed and where it is: the click target already sits on the
     // resting rectangle of the thumbnail, so all this changes is the moment of
-    // the draw. The region is the damage of the whole pass, for the same reason
-    // as in drawLifted(): the region of the window just painted is clipped to
-    // that window.
+    // the draw, and the region it is clipped to is the one of that moment.
     WindowPaintData data;
     effects->drawWindow(renderTarget, viewport, overlay,
-        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, m_paintRegion, data);
+        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
 }
 
 void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
-    const RenderViewport &viewport, EffectWindow *w, const BloomState &state) const
+    const RenderViewport &viewport, BloomState &state, const Region &deviceRegion)
 {
-    const QRectF rect = state.rect.current;
+    // Kept from the relayout that placed the frame rather than looked up here,
+    // for the same reason as the caption: this runs for every bloomed window of
+    // every frame, and the lookup walks the internal windows.
+    if (!state.outlineWindow && state.outline) {
+        state.outlineWindow = effects->findWindow(state.outline.get());
+    }
 
-    // How much of a thumbnail there is to frame, which is what the outline as a
-    // whole fades with. The caption channel is exactly that measure already (full
-    // at rest, gone on the way home and on a dive), and the hover empties it
-    // while raising the highlight, so the two are added rather than the larger of
-    // them taken: complementary channels crossing over would dip to a half at the
-    // middle of every hover and blink the outline.
-    const qreal strength = std::min(1.0, state.caption.current + state.highlight.current);
-    if (!effects->isOpenGLCompositing() || rect.isEmpty() || strength <= outlineEpsilon) {
+    EffectWindow *overlay = state.outlineWindow;
+    if (!overlay || !overlay->isVisible()) {
         return;
     }
 
-    // The hover does not raise the outline out of nothing; it thickens the one
+    // Nothing is transformed here, which is the whole point of the frame store:
+    // refreshOutline() has already moved it onto the thumbnail and painted the
+    // line into it at the size this very frame draws, so the window is drawn
+    // where it is and at the size it is. Scaling it is what used to soften the
+    // line on a thumbnail the pointer had grown, and the smaller the thumbnail
+    // the further it was scaled.
+    WindowPaintData data;
+    effects->drawWindow(renderTarget, viewport, overlay,
+        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
+}
+
+void ThumbnailBloomEffect::updateOutline(EffectWindow *w, BloomState &state)
+{
+    // Only ever reached from the relayout pass, like the click target: hiding an
+    // internal window makes KWin destroy it synchronously, which must not happen
+    // under pointer dispatch or under the effect chain.
+    //
+    // A window travelling back to its own geometry stops being a thumbnail, but
+    // it keeps its frame for as long as there is any of it left to fade out;
+    // refreshOutline() is what empties it, and the state is dropped once the
+    // trip ends.
+    const bool leaving = sameRect(state.base, frameRect(w)) || state.diving;
+    if (leaving && state.caption.current <= 0.0 && state.highlight.current <= 0.0) {
+        if (state.outline) {
+            state.outline->hide();
+            state.outlineWindow = nullptr;
+        }
+        return;
+    }
+
+    // A dive has no rectangle to speak of: the thumbnail is shrinking into the
+    // point its screen collapses to. A store already up keeps the size it has,
+    // the frame inside it shrinking with the thumbnail; one that is not up has
+    // nothing to be sized by and is not put up at all.
+    if (!state.outline && state.base.isEmpty()) {
+        return;
+    }
+
+    if (!state.outline) {
+        state.outline = std::make_unique<OutlineOverlay>();
+        // Registered before it is ever shown: from the moment it is, the paint
+        // pass and the layout both have to recognise it for one of its own.
+        m_ownOverlays.insert(state.outline.get());
+        m_drawnOverlays.insert(state.outline.get());
+    }
+
+    // Where the store goes and how large it is are settled by refreshOutline(),
+    // which runs for every frame of every animation; it is called here so that a
+    // frame store put up for the first time is already on its thumbnail when it
+    // is shown.
+    refreshOutline(w, state);
+    showOverlay(state.outline.get());
+
+    // Every show() makes a fresh window of the frame, so the one the scene knows
+    // is picked up here rather than looked up again on every frame that draws
+    // one.
+    state.outlineWindow = effects->findWindow(state.outline.get());
+}
+
+void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
+{
+    if (!state.outline) {
+        return;
+    }
+
+    // How much of a thumbnail there is to frame, which is what the frame as a
+    // whole fades with. The caption channel is exactly that measure already
+    // (full at rest, gone on the way home and on a dive), and the hover empties
+    // it while raising the highlight, so the two are added rather than the
+    // larger of them taken: complementary channels crossing over would dip to a
+    // half at the middle of every hover and blink the frame.
+    const qreal strength = std::min(1.0, state.caption.current + state.highlight.current);
+
+    // The hover does not raise the frame out of nothing; it thickens the one
     // that is there and turns it from the caption colour to the focus colour, so
-    // the frame of a thumbnail is drawn all the way through the animation and
-    // only ever changes weight.
+    // a thumbnail is framed all the way through the animation and only ever
+    // changes weight.
     const qreal blend = state.highlight.current;
     const qreal thickness = restOutlineWidth + (hoverOutlineWidth - restOutlineWidth) * blend;
     const QColor color = mixColors(m_restOutline, m_hoverOutline, blend);
-    const qreal width = std::min(thickness, std::min(rect.width(), rect.height()) / 3.0);
-    const int line = std::max(1, qRound(width * outlineUnit));
 
-    // The vertices are the thumbnail's own rectangle, in those fractions of a
-    // pixel and with the origin at its top left, and everything that happens to
-    // it on the way to the screen is carried by the projection instead: the turn
-    // it is drawn with, and then the scale from logical coordinates to device
-    // ones. That is what lets the shader measure against an upright box while the
-    // thumbnail is bent, and the coverage it takes from the derivative of that
-    // distance is a screen-space one, so the antialiasing follows the turn
-    // without anything here working it out. The perspective divide carries the
-    // vertex coordinates across the fragments correctly along with it, which is
-    // the very thing apply() has to cut its quads up for.
-    QMatrix4x4 mvp = viewport.projectionMatrix();
-    mvp.scale(viewport.scale(), viewport.scale());
-    mvp *= QMatrix4x4(stateBend(w, state, rect));
-    mvp.translate(rect.x(), rect.y());
-    mvp.scale(1.0 / outlineUnit, 1.0 / outlineUnit);
-
-    // The shader grows its box outwards by the thickness, so the box handed to it
-    // is the thumbnail less the line: that puts the outer edge of the line on the
-    // edge of the thumbnail and the line itself just inside it.
-    const QPointF half(rect.width() * outlineUnit / 2.0, rect.height() * outlineUnit / 2.0);
-    const QVector4D box(half.x(), half.y(), half.x() - line, half.y() - line);
-
-    // One quad over the whole thumbnail, a pixel wider all round: the coverage
-    // ramp reaches half a device pixel past the outer edge of the line, and a
-    // fragment the geometry does not cover is never asked about.
-    const QRectF span = QRectF(QPointF(0, 0), rect.size() * outlineUnit)
-                            .adjusted(-outlineUnit, -outlineUnit, outlineUnit, outlineUnit);
-    const QVector2D topLeft(span.left(), span.top());
-    const QVector2D topRight(span.right(), span.top());
-    const QVector2D bottomLeft(span.left(), span.bottom());
-    const QVector2D bottomRight(span.right(), span.bottom());
-    const std::array<QVector2D, 6> vertices
-        = { topLeft, bottomLeft, topRight, topRight, bottomLeft, bottomRight };
-
-    GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
-    vbo->reset();
-    vbo->setVertices(vertices);
-
-    // Premultiplied by hand: the uniform goes to the shader as it is, the shader
-    // scales it by the coverage of the fragment, and the blend below expects the
-    // colour to carry its own alpha already.
-    const qreal alpha = color.alphaF() * strength;
-    const QColor faded = QColor::fromRgbF(
-        color.redF() * alpha, color.greenF() * alpha, color.blueF() * alpha, alpha);
-
-    // Border alone, never with RoundedCorners: that trait masks everything down
-    // to the inside of the same box, which is precisely what the outline is not.
-    ShaderBinder binder(ShaderTrait::Border | ShaderTrait::TransformColorspace);
-    GLShader *shader = binder.shader();
-    shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
-    shader->setUniform(GLShader::Vec4Uniform::Box, box);
-    shader->setUniform(GLShader::Vec4Uniform::CornerRadius, QVector4D());
-    shader->setUniform(GLShader::IntUniform::Thickness, line);
-    shader->setUniform(GLShader::ColorUniform::Color, faded);
-    shader->setColorspaceUniforms(
-        ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
-
-    // The shader writes premultiplied alpha, and the state is left as it was
-    // found: everything painted after this expects to set up its own blending.
-    const bool blending = glIsEnabled(GL_BLEND);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    vbo->render(m_paintRegion, GL_TRIANGLES, true);
-    if (!blending) {
-        glDisable(GL_BLEND);
+    const QRectF rect = state.rect.current;
+    if (rect.isEmpty() || strength <= outlineEpsilon) {
+        state.outline->setOutline({ }, 0.0, color, 0.0);
+        return;
     }
-}
 
-void ThumbnailBloomEffect::paintScreen(const RenderTarget &renderTarget,
-    const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
-{
-    // Nothing is painted here; this only keeps hold of the damage of the pass for
-    // the thumbnail that is stamped from inside the window pass, which is handed
-    // a per-window region instead.
-    m_paintRegion = deviceRegion;
+    // The window is a store to paint frames into rather than the frame itself,
+    // and it is kept at the largest rectangle the running trip will draw: the
+    // grown one while the pointer is on the thumbnail, the real window while it
+    // blooms out or travels home, and the resting one once there is no trip
+    // left. So it is allocated when a trip starts instead of at every step of
+    // one, and the line inside it is always painted at the size it is drawn on
+    // the screen. The rectangle of this frame comes in as well, since a trip
+    // that has just been restarted has not stepped yet.
+    const QSizeF ends = state.timeline.done()
+        ? state.rect.to.size()
+        : QSizeF(std::max(state.rect.from.width(), state.rect.to.width()),
+              std::max(state.rect.from.height(), state.rect.to.height()));
 
-    // Read once for the whole pass rather than per outline: building a
-    // KColorScheme means reading and computing a whole palette, and every
-    // thumbnail of the frame is outlined between the same two colours.
-    m_restOutline = restOutlineColor();
-    m_hoverOutline = hoverOutlineColor();
+    // The store is moved onto the thumbnail every frame, and a window may only
+    // sit at whole logical pixels, so it is snapped to the coarser grid that is
+    // whole physical pixels as well; whatever fraction of a pixel is left over
+    // is carried by the corners below, which are drawn at fractions of one
+    // happily enough. That snap is also why the store is a step larger than the
+    // rectangle it has to hold: it moves the corner everything is measured from.
+    const int step = deviceGridStep(deviceScale(w));
+    const QPoint origin(floorToStep(rect.x(), step), floorToStep(rect.y(), step));
+    const QSize size(static_cast<int>(std::ceil(std::max(ends.width(), rect.width()))) + step,
+        static_cast<int>(std::ceil(std::max(ends.height(), rect.height()))) + step);
+    const QRect geometry(origin, size);
+    if (state.outline->geometry() != geometry) {
+        state.outline->setGeometry(geometry);
+    }
 
-    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+    // Where the thumbnail sits inside the store, down to the fraction of a pixel
+    // the snap left over.
+    const QRectF base(rect.topLeft() - QPointF(origin), rect.size());
+    const qreal width = std::min(thickness, std::min(base.width(), base.height()) / 3.0);
+
+    // Inside the rectangle rather than centred on it: half of a pen's width
+    // falls outside the line it is given, and the frame belongs to the
+    // thumbnail. The corners are then bent by the very map the pixels of the
+    // thumbnail are bent by, fitted to the rectangle it is drawn on.
+    const QRectF inset = base.adjusted(width / 2.0, width / 2.0, -width / 2.0, -width / 2.0);
+    const QTransform bend = stateBend(w, state, base);
+    const std::array<QPointF, 4> corners = { bend.map(inset.topLeft()), bend.map(inset.topRight()),
+        bend.map(inset.bottomRight()), bend.map(inset.bottomLeft()) };
+
+    state.outline->setOutline(corners, width, color, strength);
 }
 
 void ThumbnailBloomEffect::postPaintScreen()
 {
-    // The next frame of the animation is asked for here, over the ground the
-    // thumbnails are moving across rather than over the whole screen; its own
-    // prePaintScreen() widens that damage to wherever they have got to by then.
+    // The next frame of the animation is asked for here, over the ground this
+    // step covered rather than over the whole screen; the pass it brings on
+    // widens its damage by whatever is still owed to the screen it paints. It is
+    // asked for whether or not the step was the last of the trip, since a step
+    // taken in the pass of one screen has still to be drawn by the other, and
+    // the frame that follows a step where nothing moved asks for nothing and
+    // ends the chain.
+    //
     // Nothing is asked for on behalf of the lifted thumbnails: they are drawn
     // again whenever a pass happens at all, and one that has come to rest needs
     // no pass of its own.
-    if (m_animating && !m_dirty.isEmpty()) {
-        effects->addRepaint(Region(m_dirty));
+    if (!m_moved.isEmpty()) {
+        effects->addRepaint(Region(m_moved));
     }
 
     Effect::postPaintScreen();

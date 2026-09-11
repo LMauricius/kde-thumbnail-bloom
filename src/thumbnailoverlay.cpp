@@ -13,6 +13,7 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPolygonF>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QStyleHints>
@@ -20,6 +21,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <vector>
 
@@ -384,6 +386,110 @@ void OverlayWindow::mousePressEvent(QMouseEvent *event) { event->accept(); }
 void OverlayWindow::mouseReleaseEvent(QMouseEvent *event) { event->accept(); }
 
 void OverlayWindow::wheelEvent(QWheelEvent *event) { event->accept(); }
+
+// ---------------------------------------------------------------------------
+// Outline
+// ---------------------------------------------------------------------------
+
+/*!
+ * Returns the part of the store a frame of \a corners drawn \a width wide
+ * covers, rounded out to whole pixels.
+ *
+ * Half of a pen's width falls on either side of the line it is given, and the
+ * coverage ramp that antialiases it reaches a pixel further still.
+ */
+static QRect outlineBounds(const std::array<QPointF, 4> &corners, qreal width)
+{
+    if (width <= 0.0) {
+        return QRect();
+    }
+
+    const QRectF bounds
+        = QPolygonF({ corners[0], corners[1], corners[2], corners[3] }).boundingRect();
+    const qreal reach = width / 2.0 + 1.0;
+    return bounds.adjusted(-reach, -reach, reach, reach).toAlignedRect();
+}
+
+OutlineOverlay::OutlineOverlay()
+{
+    // It paints and nothing else: the click target underneath answers for the
+    // whole thumbnail, and two windows fighting over the same pixel would give
+    // the pointer nowhere to settle.
+    setOutputOnly(true);
+
+    // Hiding an internal window destroys it, and what comes back may be holding
+    // a buffer of its own, so the first paint after a window has been away
+    // clears the whole store rather than only the ground of the line it drew
+    // last.
+    connect(this, &QWindow::visibleChanged, this, [this](bool) { m_paintedSize = QSize(); });
+}
+
+void OutlineOverlay::setOutline(
+    const std::array<QPointF, 4> &corners, qreal width, const QColor &color, qreal strength)
+{
+    // A twentieth of a pixel either way is not worth a repaint and the upload
+    // that comes with it: every frame of a hover offers a slightly different
+    // line, and the difference between two of them is not visible.
+    const auto same = [](qreal a, qreal b) { return std::abs(a - b) < 0.05; };
+    bool changed = !same(width, m_width) || !same(strength, m_strength) || color != m_color;
+    for (size_t i = 0; i < corners.size() && !changed; ++i) {
+        changed
+            = !same(corners[i].x(), m_corners[i].x()) || !same(corners[i].y(), m_corners[i].y());
+    }
+    if (!changed) {
+        return;
+    }
+
+    m_corners = corners;
+    m_width = width;
+    m_color = color;
+    m_strength = strength;
+    update();
+}
+
+void OutlineOverlay::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event)
+
+    QPainter painter(this);
+
+    // Source mode clears instead of blending: the store keeps the line where it
+    // was last drawn, and blending the new one over it would leave both. What is
+    // cleared is the ground of that line together with the ground of this one,
+    // rather than the whole store: the store is as large as the largest
+    // rectangle the running animation draws, which for a thumbnail on its way
+    // home is the whole window, and clearing all of that every frame would cost
+    // more than the line does. A store that has just been resized is the one
+    // exception, being a new buffer: what is in a part of one that nothing has
+    // painted is whatever was in that memory.
+    const QRect whole(QPoint(0, 0), size());
+    const QRect line = outlineBounds(m_corners, m_width);
+    const QRect stale = m_paintedSize == size() ? m_painted.united(line) : whole;
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.fillRect(stale.intersected(whole), Qt::transparent);
+    m_painted = line.intersected(whole);
+    m_paintedSize = size();
+
+    if (m_width <= 0.0 || m_strength <= 0.0 || !m_color.isValid()) {
+        return;
+    }
+
+    QColor color = m_color;
+    color.setAlphaF(std::clamp<qreal>(color.alphaF() * m_strength, 0.0, 1.0));
+
+    QPen pen(color, m_width);
+    pen.setJoinStyle(Qt::MiterJoin);
+
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPolygon(QPolygonF({ m_corners[0], m_corners[1], m_corners[2], m_corners[3] }));
+}
+
+// ---------------------------------------------------------------------------
+// Click target
+// ---------------------------------------------------------------------------
 
 ThumbnailOverlay::ThumbnailOverlay()
 {
