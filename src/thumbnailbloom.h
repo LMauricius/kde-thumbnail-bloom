@@ -282,7 +282,13 @@ private:
      * plain rectangle would not do; the map has to be applied.
      */
     QRectF paintedArea(KWin::EffectWindow *w, const BloomState &state) const;
-    /*! Applies the thumbnail transformation of \a state to \a data. */
+    /*!
+     * Applies the thumbnail transformation of \a state to \a data.
+     *
+     * The picture is drawn thumbnailBleed larger than the rectangle of \a state
+     * on every side, so that its edge runs under the frame instead of meeting
+     * it. Nothing but the drawing grows by it.
+     */
     void applyTransform(
         KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
     /*!
@@ -347,9 +353,12 @@ private:
      * moved onto the thumbnail every frame, and the line is painted into it at
      * the size it is drawn at, bent by the same map as the pixels of the
      * thumbnail. So nothing about it is ever scaled, and its width is the width
-     * it asks for. It lies outside the thumbnail, all but the outlineOverlap of
-     * it that straddles the edge, which is why the store is a margin larger than
-     * the rectangle it holds.
+     * it asks for. It lies outside the thumbnail, which is why the store is a
+     * margin larger than the rectangle it holds, and it is the line rather than
+     * the thumbnail that is put on the physical pixel grid: the band it covers
+     * is snapped and its width is a whole number of pixels, so it is drawn sharp
+     * at every step of an animation. What that leaves between the line and the
+     * picture is covered by thumbnailBleed.
      */
     void refreshOutline(KWin::EffectWindow *w, BloomState &state);
     /*!

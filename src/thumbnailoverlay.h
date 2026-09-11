@@ -84,11 +84,13 @@ protected:
  * corners handed to setOutline() are already the bent ones, at the size of this
  * very frame.
  *
- * The line lies outside the thumbnail rather than on it, so that it hides next
- * to nothing of the picture, and it is drawn over the thumbnail all the same:
- * the shadow of a window is painted with it and reaches further out than the
- * frame does. Half a pixel of the line straddles the edge, which is what keeps
- * two antialiased edges from leaving a half-covered seam between them.
+ * The line lies outside the thumbnail rather than on it, so that it hides
+ * nothing of the picture, and it is drawn over the thumbnail all the same: the
+ * shadow of a window is painted with it and reaches further out than the frame
+ * does. The corners handed to setOutline() are on the physical pixel grid and
+ * the width is a whole number of pixels, so the line comes out sharp; the
+ * thumbnail underneath is bled half a pixel outwards to meet it, the picture
+ * being the one of the two that can be stretched unnoticed.
  *
  * It takes no input at all, the click target below it answering for the whole
  * thumbnail.

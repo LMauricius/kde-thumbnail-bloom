@@ -240,16 +240,17 @@ constexpr qreal hoverOutlineWidth = 6.0;
 constexpr qreal restOutlineWidth = 1.0;
 
 /*!
- * How far the outline reaches inside the rectangle it frames, in logical pixels.
+ * How far past its own rectangle a thumbnail is drawn, in logical pixels.
  *
- * The rest of it is drawn outside, so that the line hides next to nothing of the
- * thumbnail. This much of it runs over the edge, which is what keeps a seam from
- * appearing there: the line and the thumbnail are two antialiased edges, and
- * meeting them exactly on the same coordinate would leave a row of half-covered
- * pixels between the two. Half a pixel of overlap is enough, the line being
- * drawn over the picture rather than under it.
+ * The frame is drawn outside that rectangle and put on the physical pixel grid,
+ * which can leave its inner edge a fraction of a pixel clear of the picture, and
+ * two antialiased edges meeting would leave a row of half-covered pixels between
+ * them in any case. So the thumbnail is bled outwards instead: the frame is the
+ * thing that has to be sharp, and a picture stretched by half a pixel is a
+ * picture nobody can tell from the one it was. The line is drawn over the bleed
+ * and hides it.
  */
-constexpr qreal outlineOverlap = 0.5;
+constexpr qreal thumbnailBleed = 0.5;
 
 //! Strength below which there is no outline left to paint.
 constexpr qreal outlineEpsilon = 1e-2;
@@ -267,10 +268,11 @@ constexpr qreal outlineSlack = 0.05;
 
 /*!
  * Margin kept around a thumbnail wherever its ground is measured, in logical
- * pixels: the widest the outline is ever drawn, and a pixel for the coverage
- * ramp that antialiases it.
+ * pixels: the widest the outline is ever drawn, a pixel for the coverage ramp
+ * that antialiases it, and one more for the snap that puts the line on the
+ * physical pixel grid.
  */
-constexpr qreal paintMargin = hoverOutlineWidth + 1.0;
+constexpr qreal paintMargin = hoverOutlineWidth + 2.0;
 
 //! How far past its resting growth of 1 a thumbnail must be drawn to count as lifted.
 constexpr qreal liftEpsilon = 1e-3;
@@ -1836,12 +1838,19 @@ void ThumbnailBloomEffect::applyTransform(
         return;
     }
 
+    // A hair larger than the rectangle the layout gave it, so that the edge of
+    // the picture runs under the inner edge of the frame instead of meeting it:
+    // see thumbnailBleed. Only the drawing grows. Everything that measures a
+    // thumbnail (the hit region, the lift, the damage) works from the rectangle
+    // itself, which is what the frame is drawn around too.
+    const QRectF drawn = state.rect.current.adjusted(
+        -thumbnailBleed, -thumbnailBleed, thumbnailBleed, thumbnailBleed);
+
     // Scaling happens around the window's top left corner, so the translation is
     // expressed in unscaled screen coordinates.
-    data.setScale(QVector2D(state.rect.current.width() / natural.width(),
-        state.rect.current.height() / natural.height()));
-    data.setXTranslation(state.rect.current.x() - natural.x());
-    data.setYTranslation(state.rect.current.y() - natural.y());
+    data.setScale(QVector2D(drawn.width() / natural.width(), drawn.height() / natural.height()));
+    data.setXTranslation(drawn.x() - natural.x());
+    data.setYTranslation(drawn.y() - natural.y());
     data.multiplyOpacity(state.opacity.current);
 }
 
@@ -2270,8 +2279,9 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
         // the thumbnail rather than under it, although it is drawn outside the
         // rectangle it frames: the shadow of a window reaches past that
         // rectangle and is painted with the thumbnail, so a line underneath
-        // would be tinted by it. Over the picture the line only has to cover its
-        // own overlap, which is what leaves no seam at the edge.
+        // would be tinted by it. Over the picture it also covers the half pixel
+        // the thumbnail is bled outwards by, which is what leaves no seam at the
+        // edge.
         if (it != m_states.end()) {
             applyTransform(w, it->second, data);
         }
@@ -2530,7 +2540,8 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
     // rectangle it has to hold: it moves the corner everything is measured from.
     // The margin on every side is the room the line itself needs, being drawn
     // outside the thumbnail rather than on it.
-    const int step = deviceGridStep(deviceScale(w));
+    const qreal scale = deviceScale(w);
+    const int step = deviceGridStep(scale);
     const int pad = static_cast<int>(std::ceil(paintMargin));
     const QPoint origin(floorToStep(rect.x() - pad, step), floorToStep(rect.y() - pad, step));
     const QSize size(
@@ -2544,21 +2555,30 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
     // Where the thumbnail sits inside the store, down to the fraction of a pixel
     // the snap left over.
     const QRectF base(rect.topLeft() - QPointF(origin), rect.size());
-    const qreal width = std::min(thickness, std::min(base.width(), base.height()) / 3.0);
 
-    // Outside the rectangle rather than inside it: the thumbnail is the picture,
-    // and a line laid on it covers a strip of the very thing it is drawing
-    // attention to. Half of a pen's width falls on either side of the line it is
-    // given, so the corners are pushed out by half of the width and drawn back
-    // in by the overlap, which leaves the line straddling the edge by that much
-    // and outside it for all the rest. They are then bent by the very map the
-    // pixels of the thumbnail are bent by, fitted to the rectangle it is drawn
-    // on.
-    const qreal reach = width / 2.0 - outlineOverlap;
-    const QRectF outset = base.adjusted(-reach, -reach, reach, reach);
+    // Whole physical pixels, and never fewer than one: a pen a fraction of a
+    // pixel wide covers the pixel at either edge of it by a fraction, which
+    // comes out as two grey rows where one sharp row was asked for.
+    const qreal pixel = 1.0 / scale;
+    const qreal room = std::min(base.width(), base.height()) / 3.0;
+    const qreal width = std::max(pixel, std::round(std::min(thickness, room) / pixel) * pixel);
+
+    // Outside the rectangle rather than on it: the thumbnail is the picture, and
+    // a line laid over it covers a strip of the very thing it draws attention
+    // to. The band runs from the edge of the thumbnail outwards, and it is the
+    // band that is put on the pixel grid rather than the thumbnail: its outer
+    // boundary is snapped and its width is a whole number of pixels, so both of
+    // its edges fall on pixel boundaries however the animation has left the
+    // rectangle underneath. Whatever fraction of a pixel that leaves between the
+    // two is covered by the bleed of the thumbnail. The pen is given the middle
+    // of the band, half a width falling on either side of the line it is drawn
+    // along, and those corners are bent by the very map the pixels of the
+    // thumbnail are bent by.
+    const QRectF band = roundToDevice(base.adjusted(-width, -width, width, width), scale);
+    const QRectF centre = band.adjusted(width / 2.0, width / 2.0, -width / 2.0, -width / 2.0);
     const QTransform bend = stateBend(w, state, base);
-    const std::array<QPointF, 4> corners = { bend.map(outset.topLeft()), bend.map(outset.topRight()),
-        bend.map(outset.bottomRight()), bend.map(outset.bottomLeft()) };
+    const std::array<QPointF, 4> corners = { bend.map(centre.topLeft()), bend.map(centre.topRight()),
+        bend.map(centre.bottomRight()), bend.map(centre.bottomLeft()) };
 
     state.outline->setOutline(base, corners, width, color, strength);
 }
