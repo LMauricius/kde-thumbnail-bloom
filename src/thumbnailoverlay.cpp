@@ -11,6 +11,7 @@
 #include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QImage>
+#include <QCoreApplication>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPolygonF>
@@ -424,8 +425,10 @@ OutlineOverlay::OutlineOverlay()
     connect(this, &QWindow::visibleChanged, this, [this](bool) { m_paintedSize = QSize(); });
 }
 
-void OutlineOverlay::setOutline(
-    const std::array<QPointF, 4> &corners, qreal width, const QColor &color, qreal strength)
+QRectF OutlineOverlay::shownRect() const { return m_shown; }
+
+void OutlineOverlay::setOutline(const QRectF &content, const std::array<QPointF, 4> &corners,
+    qreal width, const QColor &color, qreal strength)
 {
     // A twentieth of a pixel either way is not worth a repaint and the upload
     // that comes with it: every frame of a hover offers a slightly different
@@ -440,11 +443,26 @@ void OutlineOverlay::setOutline(
         return;
     }
 
+    m_content = content;
     m_corners = corners;
     m_width = width;
     m_color = color;
     m_strength = strength;
+
+    // Painted in this very turn rather than whenever the event loop gets round
+    // to it. The effect hands the frame over from inside the pass that is
+    // drawing this step of the animation, and it has already moved the store
+    // onto the thumbnail; a paint left to the update timer would put the line of
+    // the step before into the buffer the pass then draws, which is a frame of
+    // lag against a thumbnail in motion. Sending the request by hand is what
+    // Qt's own timer does when it goes off, so the paint and the flush that
+    // follows it are the ordinary ones and only the moment is ours. An
+    // unexposed window has nothing to paint into and is left to the timer.
     update();
+    if (isExposed()) {
+        QEvent request(QEvent::UpdateRequest);
+        QCoreApplication::sendEvent(this, &request);
+    }
 }
 
 void OutlineOverlay::paintEvent(QPaintEvent *event)
@@ -469,6 +487,9 @@ void OutlineOverlay::paintEvent(QPaintEvent *event)
     painter.fillRect(stale.intersected(whole), Qt::transparent);
     m_painted = line.intersected(whole);
     m_paintedSize = size();
+    // What the buffer holds from here on, which is what the effect measures its
+    // draw against.
+    m_shown = m_content;
 
     if (m_width <= 0.0 || m_strength <= 0.0 || !m_color.isValid()) {
         return;

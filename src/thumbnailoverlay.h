@@ -94,20 +94,36 @@ public:
     OutlineOverlay();
 
     /*!
-     * Sets the frame to draw: the four \a corners in window coordinates,
-     * clockwise from the top left, a line \a width logical pixels wide, in
-     * \a color, at \a strength of its full opacity.
+     * Sets the frame to draw around \a content, the part of the store the
+     * thumbnail covers: the four \a corners in window coordinates, clockwise
+     * from the top left, a line \a width logical pixels wide, in \a color, at
+     * \a strength of its full opacity.
      *
      * A change too small to be seen is dropped rather than repainted, since
-     * every frame of a hover offers a slightly different one.
+     * every frame of a hover offers a slightly different one. Anything else is
+     * painted before this returns, not when the event loop next comes round: the
+     * compositor is in the middle of drawing the very step of the animation this
+     * frame belongs to.
      */
-    void setOutline(
-        const std::array<QPointF, 4> &corners, qreal width, const QColor &color, qreal strength);
+    void setOutline(const QRectF &content, const std::array<QPointF, 4> &corners, qreal width,
+        const QColor &color, qreal strength);
+
+    /*!
+     * Returns the rectangle the frame now in the store was painted around, in
+     * window coordinates, which is empty until one has been.
+     *
+     * It is what the buffer actually holds rather than what was last asked for,
+     * so the effect can tell whether the two have come apart and put the draw
+     * right if they have.
+     */
+    QRectF shownRect() const;
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
+    QRectF m_content; //!< part of the store the thumbnail covers, as last asked for
+    QRectF m_shown; //!< the same, as the buffer now holds it
     std::array<QPointF, 4> m_corners {};
     qreal m_width = 0.0;
     QColor m_color;

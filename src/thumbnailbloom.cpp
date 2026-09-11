@@ -243,6 +243,17 @@ constexpr qreal restOutlineWidth = 1.0;
 constexpr qreal outlineEpsilon = 1e-2;
 
 /*!
+ * How far the frame in the store may be off the thumbnail before the draw puts
+ * it right, in logical pixels.
+ *
+ * The same twentieth of a pixel OutlineOverlay::setOutline() calls a change
+ * worth repainting, and it has to be: a difference it drops is one no transform
+ * should be spent on either, since the store then holds the frame this one asked
+ * for and correcting it would resample the line for nothing.
+ */
+constexpr qreal outlineSlack = 0.05;
+
+/*!
  * Margin kept around a thumbnail wherever its ground is measured, in logical
  * pixels: the widest the outline is ever drawn, and a pixel for the coverage
  * ramp that antialiases it.
@@ -2366,13 +2377,38 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
         return;
     }
 
-    // Nothing is transformed here, which is the whole point of the frame store:
-    // refreshOutline() has already moved it onto the thumbnail and painted the
-    // line into it at the size this very frame draws, so the window is drawn
-    // where it is and at the size it is. Scaling it is what used to soften the
-    // line on a thumbnail the pointer had grown, and the smaller the thumbnail
-    // the further it was scaled.
+    // Normally nothing is transformed here, which is the whole point of the
+    // frame store: refreshOutline() has moved it onto the thumbnail and painted
+    // the line into it at the size this very frame draws, in this very turn, so
+    // the window is drawn where it is and at the size it is. Scaling it is what
+    // used to soften the line on a thumbnail the pointer had grown, and the
+    // smaller the thumbnail the further it was scaled.
+    //
+    // What the store holds is asked all the same, rather than assumed: a paint
+    // can be missed (a window not yet exposed, a geometry KWin has not committed
+    // yet), and a frame of the thumbnail drawn with the line of the frame before
+    // is a line lagging behind its thumbnail. So the buffer is put where it
+    // belongs whatever is in it, which at worst is the step before this one and
+    // a scale of a few hundredths.
     WindowPaintData data;
+    const QRectF rect = state.rect.current;
+    const QRectF shown = state.outline ? state.outline->shownRect() : QRectF();
+    if (!rect.isEmpty() && !shown.isEmpty()) {
+        const QPointF origin = overlay->frameGeometry().topLeft();
+        const QRectF painted(origin + shown.topLeft(), shown.size());
+        const auto near = [](qreal a, qreal b) { return std::abs(a - b) < outlineSlack; };
+        if (!near(painted.x(), rect.x()) || !near(painted.y(), rect.y())
+            || !near(painted.width(), rect.width()) || !near(painted.height(), rect.height())) {
+            // Scale about the window's own corner, translation in unscaled
+            // screen coordinates: the store's corner has to land where the
+            // painted rectangle's corner is asked to go.
+            const qreal scaleX = rect.width() / shown.width();
+            const qreal scaleY = rect.height() / shown.height();
+            data.setScale(QVector2D(scaleX, scaleY));
+            data.setXTranslation(rect.x() - origin.x() - shown.x() * scaleX);
+            data.setYTranslation(rect.y() - origin.y() - shown.y() * scaleY);
+        }
+    }
     effects->drawWindow(renderTarget, viewport, overlay,
         PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
 }
@@ -2449,7 +2485,7 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
 
     const QRectF rect = state.rect.current;
     if (rect.isEmpty() || strength <= outlineEpsilon) {
-        state.outline->setOutline({ }, 0.0, color, 0.0);
+        state.outline->setOutline(QRectF(), { }, 0.0, color, 0.0);
         return;
     }
 
@@ -2495,7 +2531,7 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
     const std::array<QPointF, 4> corners = { bend.map(inset.topLeft()), bend.map(inset.topRight()),
         bend.map(inset.bottomRight()), bend.map(inset.bottomLeft()) };
 
-    state.outline->setOutline(corners, width, color, strength);
+    state.outline->setOutline(base, corners, width, color, strength);
 }
 
 void ThumbnailBloomEffect::postPaintScreen()

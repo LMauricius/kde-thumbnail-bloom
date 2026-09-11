@@ -317,11 +317,14 @@ private:
      * Draws the frame of \a state, which is a window of its own
      * (OutlineOverlay) rather than anything the effect stamps on the screen.
      *
-     * Nothing is transformed: refreshOutline() has already put the frame store
-     * on the thumbnail and painted the line into it at the size of this very
-     * frame, so all this does is draw the window where it is, right after the
-     * thumbnail and under the caption. \a deviceRegion is the clip, the region
-     * the thumbnail itself was painted with.
+     * refreshOutline() has already put the frame store on the thumbnail and
+     * painted the line into it at the size of this very frame, so all this
+     * normally does is draw the window where it is, right after the thumbnail
+     * and under the caption. Should the store hold an older frame after all, it
+     * is scaled from the rectangle it was painted around onto the one the
+     * thumbnail is drawn at, so the line cannot lag behind the picture whatever
+     * became of the paint. \a deviceRegion is the clip, the region the thumbnail
+     * itself was painted with.
      */
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         BloomState &state, const KWin::Region &deviceRegion);
