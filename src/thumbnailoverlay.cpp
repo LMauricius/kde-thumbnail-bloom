@@ -14,6 +14,7 @@
 #include <QCoreApplication>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPolygonF>
 #include <QResizeEvent>
 #include <QScreen>
@@ -393,11 +394,11 @@ void OverlayWindow::wheelEvent(QWheelEvent *event) { event->accept(); }
 // ---------------------------------------------------------------------------
 
 /*!
- * Returns the part of the store a frame of \a corners drawn \a width wide
+ * Returns the part of the store a frame drawn \a width wide around \a corners
  * covers, rounded out to whole pixels.
  *
- * Half of a pen's width falls on either side of the line it is given, and the
- * coverage ramp that antialiases it reaches a pixel further still.
+ * The whole of the frame lies outside the corners it is given, and the coverage
+ * ramp that antialiases it reaches a pixel further still.
  */
 static QRect outlineBounds(const std::array<QPointF, 4> &corners, qreal width)
 {
@@ -407,8 +408,65 @@ static QRect outlineBounds(const std::array<QPointF, 4> &corners, qreal width)
 
     const QRectF bounds
         = QPolygonF({ corners[0], corners[1], corners[2], corners[3] }).boundingRect();
-    const qreal reach = width / 2.0 + 1.0;
+    const qreal reach = width + 1.0;
     return bounds.adjusted(-reach, -reach, reach, reach).toAlignedRect();
+}
+
+/*!
+ * Returns the ring to fill for a frame \a width wide lying outside \a corners,
+ * which run clockwise from the top left.
+ *
+ * Sharp on the inside, where it meets the picture, and rounded on the outside by
+ * the width of the frame itself. Each outer corner is an arc centred on the
+ * inner corner, which is what makes that radius the right one: every point of
+ * the arc is then exactly \a width from the corner the frame is drawn around, so
+ * the ring is the same thickness at the corners as it is along the edges. It is
+ * a fill rather than a stroke because a pen rounds a join by half its width and
+ * rounds the inside of it too.
+ */
+static QPainterPath outlinePath(const std::array<QPointF, 4> &corners, qreal width)
+{
+    //! Outward normal of the edge leaving corner \a i, the corners running clockwise.
+    const auto normal = [&corners](int i) {
+        const QPointF edge = corners[(i + 1) % 4] - corners[i];
+        const qreal length = std::hypot(edge.x(), edge.y());
+        return length > 0.0 ? QPointF(edge.y() / length, -edge.x() / length) : QPointF();
+    };
+    //! The same direction as the angle QPainterPath measures arcs in.
+    const auto angle = [](const QPointF &direction) {
+        return std::atan2(-direction.y(), direction.x()) * 180.0 / M_PI;
+    };
+
+    QPainterPath path;
+    for (int i = 0; i < 4; ++i) {
+        const QRectF arc(corners[i] - QPointF(width, width), QSizeF(2.0 * width, 2.0 * width));
+        const qreal from = angle(normal((i + 3) % 4));
+        qreal sweep = angle(normal(i)) - from;
+
+        // Clockwise, the way the corners themselves run, so that the arc is the
+        // short way round the outside of the corner rather than the long way
+        // round the inside of it.
+        while (sweep > 0.0) {
+            sweep -= 360.0;
+        }
+        while (sweep <= -360.0) {
+            sweep += 360.0;
+        }
+
+        if (i == 0) {
+            path.arcMoveTo(arc, from);
+        }
+        path.arcTo(arc, from, sweep);
+    }
+    path.closeSubpath();
+
+    // The hole. Odd-even fill is what makes the second subpath one: the picture
+    // reaches right into the corner, and only the outside of the frame is
+    // rounded.
+    path.addPolygon(QPolygonF({ corners[0], corners[1], corners[2], corners[3] }));
+    path.closeSubpath();
+    path.setFillRule(Qt::OddEvenFill);
+    return path;
 }
 
 OutlineOverlay::OutlineOverlay()
@@ -498,14 +556,9 @@ void OutlineOverlay::paintEvent(QPaintEvent *event)
     QColor color = m_color;
     color.setAlphaF(std::clamp<qreal>(color.alphaF() * m_strength, 0.0, 1.0));
 
-    QPen pen(color, m_width);
-    pen.setJoinStyle(Qt::MiterJoin);
-
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(pen);
-    painter.setBrush(Qt::NoBrush);
-    painter.drawPolygon(QPolygonF({ m_corners[0], m_corners[1], m_corners[2], m_corners[3] }));
+    painter.fillPath(outlinePath(m_corners, m_width), color);
 }
 
 // ---------------------------------------------------------------------------

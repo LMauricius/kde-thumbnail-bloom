@@ -358,7 +358,9 @@ private:
      * the thumbnail that is put on the physical pixel grid: the band it covers
      * is snapped and its width is a whole number of pixels, so it is drawn sharp
      * at every step of an animation. What that leaves between the line and the
-     * picture is covered by thumbnailBleed.
+     * picture is covered by thumbnailBleed. The corners handed over are the
+     * inside of the frame, which the store fills outwards from and rounds on its
+     * outer corners alone.
      */
     void refreshOutline(KWin::EffectWindow *w, BloomState &state);
     /*!

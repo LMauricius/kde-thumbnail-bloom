@@ -2570,15 +2570,15 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
     // boundary is snapped and its width is a whole number of pixels, so both of
     // its edges fall on pixel boundaries however the animation has left the
     // rectangle underneath. Whatever fraction of a pixel that leaves between the
-    // two is covered by the bleed of the thumbnail. The pen is given the middle
-    // of the band, half a width falling on either side of the line it is drawn
-    // along, and those corners are bent by the very map the pixels of the
-    // thumbnail are bent by.
+    // two is covered by the bleed of the thumbnail. What the store is handed is
+    // the inside of the band, the frame being filled outwards from there and
+    // rounded on its outer corners alone, and those corners are bent by the very
+    // map the pixels of the thumbnail are bent by.
     const QRectF band = roundToDevice(base.adjusted(-width, -width, width, width), scale);
-    const QRectF centre = band.adjusted(width / 2.0, width / 2.0, -width / 2.0, -width / 2.0);
+    const QRectF inner = band.adjusted(width, width, -width, -width);
     const QTransform bend = stateBend(w, state, base);
-    const std::array<QPointF, 4> corners = { bend.map(centre.topLeft()), bend.map(centre.topRight()),
-        bend.map(centre.bottomRight()), bend.map(centre.bottomLeft()) };
+    const std::array<QPointF, 4> corners = { bend.map(inner.topLeft()), bend.map(inner.topRight()),
+        bend.map(inner.bottomRight()), bend.map(inner.bottomLeft()) };
 
     state.outline->setOutline(base, corners, width, color, strength);
 }

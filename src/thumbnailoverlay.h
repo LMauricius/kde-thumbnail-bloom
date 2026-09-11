@@ -92,6 +92,10 @@ protected:
  * thumbnail underneath is bled half a pixel outwards to meet it, the picture
  * being the one of the two that can be stretched unnoticed.
  *
+ * Sharp on the inside and rounded on the outside, by the width of the frame
+ * itself: the picture keeps its corners, and the frame around them is the same
+ * thickness at a corner as it is along an edge.
+ *
  * It takes no input at all, the click target below it answering for the whole
  * thumbnail.
  */
@@ -104,13 +108,13 @@ public:
 
     /*!
      * Sets the frame to draw around \a content, the part of the store the
-     * thumbnail covers: the four \a corners of the line's centre in window
-     * coordinates, clockwise from the top left, a pen \a width logical pixels
-     * wide, in \a color, at \a strength of its full opacity.
+     * thumbnail covers: the four \a corners of the inside of the frame in window
+     * coordinates, clockwise from the top left, a band \a width logical pixels
+     * wide outside them, in \a color, at \a strength of its full opacity.
      *
-     * The corners lie outside \a content rather than on it, the effect having
-     * pushed them out: what is asked for here is only a pen, and where it runs
-     * is the effect's business.
+     * The corners are the inside of the frame and not its middle, so the whole
+     * of the band lies outside them. They are the picture's own corners, sharp,
+     * while the outside of each one is rounded by the width of the band.
      *
      * A change too small to be seen is dropped rather than repainted, since
      * every frame of a hover offers a slightly different one. Anything else is
