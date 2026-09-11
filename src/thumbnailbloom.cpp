@@ -239,6 +239,18 @@ constexpr qreal hoverOutlineWidth = 6.0;
 //! Width of the outline of a thumbnail at rest, in logical pixels.
 constexpr qreal restOutlineWidth = 1.0;
 
+/*!
+ * How far the outline reaches inside the rectangle it frames, in logical pixels.
+ *
+ * The rest of it is drawn outside, so that the line hides next to nothing of the
+ * thumbnail. This much of it runs over the edge, which is what keeps a seam from
+ * appearing there: the line and the thumbnail are two antialiased edges, and
+ * meeting them exactly on the same coordinate would leave a row of half-covered
+ * pixels between the two. Half a pixel of overlap is enough, the line being
+ * drawn over the picture rather than under it.
+ */
+constexpr qreal outlineOverlap = 0.5;
+
 //! Strength below which there is no outline left to paint.
 constexpr qreal outlineEpsilon = 1e-2;
 
@@ -2247,19 +2259,25 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     // thumbnail itself, and then its own turn is where its set is drawn.
     if (!isLifted(w)) {
         const auto it = m_states.find(w);
+        // The region the window is painted with is the clip of the frame and the
+        // caption alike: it is the damage of the pass less what opaque windows
+        // above this one cover, so what is drawn here reaches exactly as far as
+        // the thumbnail itself does. Taking the damage of the whole pass instead
+        // would draw over ground this window is buried under, and taking no
+        // region at all would draw over pixels the frame never cleared.
+        //
+        // The frame goes down after the thumbnail and before the caption. Over
+        // the thumbnail rather than under it, although it is drawn outside the
+        // rectangle it frames: the shadow of a window reaches past that
+        // rectangle and is painted with the thumbnail, so a line underneath
+        // would be tinted by it. Over the picture the line only has to cover its
+        // own overlap, which is what leaves no seam at the edge.
         if (it != m_states.end()) {
             applyTransform(w, it->second, data);
         }
 
         Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
 
-        // The region the window was painted with is the clip of everything
-        // stamped after it, the outline and the caption alike: it is the damage
-        // of the pass less what opaque windows above this one cover, so what is
-        // drawn here reaches exactly as far as the thumbnail itself did. Taking
-        // the damage of the whole pass instead would draw over ground this
-        // window is buried under, and taking no region at all would draw over
-        // pixels the frame never cleared.
         if (it != m_states.end()) {
             drawOutline(renderTarget, viewport, it->second, deviceRegion);
         }
@@ -2314,12 +2332,14 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget,
         // shadow would darken frame by frame.
         WindowPaintData data;
         applyTransform(w, it->second, data);
+
         effects->drawWindow(renderTarget, viewport, w,
             PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
 
         // The outline follows the thumbnail rather than the lift: every one of
         // them is framed, and the highlight channel only decides how thick and
-        // in what colour. See refreshOutline().
+        // in what colour. See refreshOutline(). Over the thumbnail here as
+        // everywhere, out of the reach of its shadow.
         drawOutline(renderTarget, viewport, it->second, deviceRegion);
 
         // The caption of a lifted thumbnail follows it here, so that it ends up
@@ -2508,10 +2528,14 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
     // is carried by the corners below, which are drawn at fractions of one
     // happily enough. That snap is also why the store is a step larger than the
     // rectangle it has to hold: it moves the corner everything is measured from.
+    // The margin on every side is the room the line itself needs, being drawn
+    // outside the thumbnail rather than on it.
     const int step = deviceGridStep(deviceScale(w));
-    const QPoint origin(floorToStep(rect.x(), step), floorToStep(rect.y(), step));
-    const QSize size(static_cast<int>(std::ceil(std::max(ends.width(), rect.width()))) + step,
-        static_cast<int>(std::ceil(std::max(ends.height(), rect.height()))) + step);
+    const int pad = static_cast<int>(std::ceil(paintMargin));
+    const QPoint origin(floorToStep(rect.x() - pad, step), floorToStep(rect.y() - pad, step));
+    const QSize size(
+        static_cast<int>(std::ceil(std::max(ends.width(), rect.width()))) + 2 * pad + step,
+        static_cast<int>(std::ceil(std::max(ends.height(), rect.height()))) + 2 * pad + step);
     const QRect geometry(origin, size);
     if (state.outline->geometry() != geometry) {
         state.outline->setGeometry(geometry);
@@ -2522,14 +2546,19 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
     const QRectF base(rect.topLeft() - QPointF(origin), rect.size());
     const qreal width = std::min(thickness, std::min(base.width(), base.height()) / 3.0);
 
-    // Inside the rectangle rather than centred on it: half of a pen's width
-    // falls outside the line it is given, and the frame belongs to the
-    // thumbnail. The corners are then bent by the very map the pixels of the
-    // thumbnail are bent by, fitted to the rectangle it is drawn on.
-    const QRectF inset = base.adjusted(width / 2.0, width / 2.0, -width / 2.0, -width / 2.0);
+    // Outside the rectangle rather than inside it: the thumbnail is the picture,
+    // and a line laid on it covers a strip of the very thing it is drawing
+    // attention to. Half of a pen's width falls on either side of the line it is
+    // given, so the corners are pushed out by half of the width and drawn back
+    // in by the overlap, which leaves the line straddling the edge by that much
+    // and outside it for all the rest. They are then bent by the very map the
+    // pixels of the thumbnail are bent by, fitted to the rectangle it is drawn
+    // on.
+    const qreal reach = width / 2.0 - outlineOverlap;
+    const QRectF outset = base.adjusted(-reach, -reach, reach, reach);
     const QTransform bend = stateBend(w, state, base);
-    const std::array<QPointF, 4> corners = { bend.map(inset.topLeft()), bend.map(inset.topRight()),
-        bend.map(inset.bottomRight()), bend.map(inset.bottomLeft()) };
+    const std::array<QPointF, 4> corners = { bend.map(outset.topLeft()), bend.map(outset.topRight()),
+        bend.map(outset.bottomRight()), bend.map(outset.bottomLeft()) };
 
     state.outline->setOutline(base, corners, width, color, strength);
 }

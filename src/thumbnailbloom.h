@@ -319,12 +319,15 @@ private:
      *
      * refreshOutline() has already put the frame store on the thumbnail and
      * painted the line into it at the size of this very frame, so all this
-     * normally does is draw the window where it is, right after the thumbnail
-     * and under the caption. Should the store hold an older frame after all, it
-     * is scaled from the rectangle it was painted around onto the one the
-     * thumbnail is drawn at, so the line cannot lag behind the picture whatever
-     * became of the paint. \a deviceRegion is the clip, the region the thumbnail
-     * itself was painted with.
+     * normally does is draw the window where it is, right after the thumbnail and
+     * under the caption. Over the thumbnail although the line lies outside it:
+     * the shadow of a window is painted with the thumbnail and reaches past the
+     * rectangle the frame goes on, so a line drawn underneath would be tinted by
+     * it. Should the store hold an older
+     * frame after all, it is scaled from the rectangle it was painted around
+     * onto the one the thumbnail is drawn at, so the line cannot lag behind the
+     * picture whatever became of the paint. \a deviceRegion is the clip, the
+     * region the thumbnail itself is painted with.
      */
     void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         BloomState &state, const KWin::Region &deviceRegion);
@@ -344,13 +347,16 @@ private:
      * moved onto the thumbnail every frame, and the line is painted into it at
      * the size it is drawn at, bent by the same map as the pixels of the
      * thumbnail. So nothing about it is ever scaled, and its width is the width
-     * it asks for.
+     * it asks for. It lies outside the thumbnail, all but the outlineOverlap of
+     * it that straddles the edge, which is why the store is a margin larger than
+     * the rectangle it holds.
      */
     void refreshOutline(KWin::EffectWindow *w, BloomState &state);
     /*!
      * Draws the caption of \a w, which is to say its click target, if it has one.
      *
-     * Called right after the thumbnail of \a w has been drawn, which is what
+     * Called right after the frame of \a w has been drawn, and so over both it
+     * and the picture, which is what
      * puts the caption at the depth of the thumbnail rather than at the top of
      * the screen, where the layer of an internal window would otherwise keep it.
      *

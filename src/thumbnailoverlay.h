@@ -75,13 +75,20 @@ protected:
  * own to be antialiased.
  *
  * The window is a store to paint frames into rather than the frame itself. The
- * effect keeps it at the largest rectangle the running animation will draw,
- * moves it onto the thumbnail every frame and draws it untransformed, and the
- * line is painted into the part of it the thumbnail currently covers. Nothing
- * is ever scaled that way, so the frame around a thumbnail grown under the
- * pointer is as sharp as the one around a thumbnail at rest. The bend is
- * painted rather than transformed for the same reason: the corners handed to
- * setOutline() are already the bent ones, at the size of this very frame.
+ * effect keeps it at the largest rectangle the running animation will draw plus
+ * the margin the line needs, moves it onto the thumbnail every frame and draws
+ * it untransformed, and the line is painted around the part of it the thumbnail
+ * currently covers. Nothing is ever scaled that way, so the frame around a
+ * thumbnail grown under the pointer is as sharp as the one around a thumbnail
+ * at rest. The bend is painted rather than transformed for the same reason: the
+ * corners handed to setOutline() are already the bent ones, at the size of this
+ * very frame.
+ *
+ * The line lies outside the thumbnail rather than on it, so that it hides next
+ * to nothing of the picture, and it is drawn over the thumbnail all the same:
+ * the shadow of a window is painted with it and reaches further out than the
+ * frame does. Half a pixel of the line straddles the edge, which is what keeps
+ * two antialiased edges from leaving a half-covered seam between them.
  *
  * It takes no input at all, the click target below it answering for the whole
  * thumbnail.
@@ -95,9 +102,13 @@ public:
 
     /*!
      * Sets the frame to draw around \a content, the part of the store the
-     * thumbnail covers: the four \a corners in window coordinates, clockwise
-     * from the top left, a line \a width logical pixels wide, in \a color, at
-     * \a strength of its full opacity.
+     * thumbnail covers: the four \a corners of the line's centre in window
+     * coordinates, clockwise from the top left, a pen \a width logical pixels
+     * wide, in \a color, at \a strength of its full opacity.
+     *
+     * The corners lie outside \a content rather than on it, the effect having
+     * pushed them out: what is asked for here is only a pen, and where it runs
+     * is the effect's business.
      *
      * A change too small to be seen is dropped rather than repainted, since
      * every frame of a hover offers a slightly different one. Anything else is
