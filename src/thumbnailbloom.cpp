@@ -152,6 +152,11 @@ void ThumbnailBloomEffect::Animated<QRectF>::interpolate(qreal progress)
  * result a superset of \a rect, so the pointer cannot end up outside the grown
  * thumbnail while still being inside the resting one, which would make the
  * thumbnail flip between the two sizes forever.
+ *
+ * \a area is what the thumbnail has to stay inside, and the caller hands in the
+ * room the frame needs as well: the line is drawn outside the thumbnail, so a
+ * grown one pushed flat against the work area would have its frame drawn off the
+ * screen or over the panel next to it.
  */
 static QRectF grownRect(const QRectF &rect, const QRectF &natural, const QRectF &area)
 {
@@ -957,9 +962,14 @@ void ThumbnailBloomEffect::retarget(
     if ((thumbnail && !diving) || inserted) {
         state.thumbBase = base;
     }
+    // The work area less the room the frame takes outside the thumbnail. A
+    // thumbnail at rest needs no such thing, the layout keeping its own margin
+    // from the edge of the screen, and that margin is the wider of the two.
     const QRectF target = state.hovered && !diving
-        ? roundToDevice(
-              grownRect(base, frameRect(w), QRectF(effects->clientArea(MaximizeArea, w))), scale)
+        ? roundToDevice(grownRect(base, frameRect(w),
+                            QRectF(effects->clientArea(MaximizeArea, w))
+                                .adjusted(paintMargin, paintMargin, -paintMargin, -paintMargin)),
+              scale)
         : base;
     // What the thumbnail is actually drawn at once it gets there, which is what
     // a point on it has to be measured against: the picture the pointer is
