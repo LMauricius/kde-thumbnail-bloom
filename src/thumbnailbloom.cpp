@@ -655,23 +655,6 @@ static void hideFromWindowLists(QWindow *handle)
     window->setSkipCloseAnimation(true);
 }
 
-/*!
- * Shows \a window and takes it back out of the window lists. The two go
- * together: hiding an internal window destroys the KWin::Window behind it, so
- * every show() makes a fresh one with the default flags back. One that never
- * went away still carries the flags it was given, and the relayout comes round
- * often enough for the walk of the window list to be worth skipping.
- */
-static void showOverlay(QRasterWindow *window)
-{
-    if (window->isVisible()) {
-        return;
-    }
-
-    window->show();
-    hideFromWindowLists(window);
-}
-
 /*! Sets the mask of \a window to \a mask, unless that is what it already is. */
 static void setOverlayMask(QRasterWindow *window, const QRegion &mask)
 {
@@ -729,11 +712,13 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
 
     // A second finger on a thumbnail means the gesture is for the window, so the
     // click target has to let go of the one it was following.
-    m_shieldFilter.setTouchTakenOverHandler([this](Window *window) {
-        EffectWindow *w = window->effectWindow();
-        const auto it = w ? m_states.find(w) : m_states.end();
-        if (it != m_states.end() && it->second.overlay) {
-            it->second.overlay->cancelTouch();
+    m_shieldFilter.setTouchTakenOverHandler([this](Window *) {
+        // At most one click target is following a finger at any moment, so
+        // every one of them is told; the rest have nothing to let go of.
+        for (auto &[screen, input] : m_input) {
+            if (input.target) {
+                input.target->cancelTouch();
+            }
         }
     });
 
@@ -763,14 +748,25 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
             m_menuPopup = nullptr;
             m_menuOwner = nullptr;
         }
+        // One of the effect's own going away says nothing about the layout,
+        // and it only ever goes away from the pass that has just run.
+        if (isOwnOverlay(w)) {
+            return;
+        }
         forget(w);
         scheduleRelayout();
     });
     connect(effects, &EffectsHandler::windowDeleted, this, [this](EffectWindow *w) { forget(w); });
     connect(effects, &EffectsHandler::windowActivated, this,
         [this](EffectWindow *) { scheduleRelayout(); });
-    connect(effects, &EffectsHandler::stackingOrderChanged, this,
-        &ThumbnailBloomEffect::scheduleRelayout);
+    // Not while the effect is putting up or taking down a window of its own:
+    // that restacks nothing the layout reads, and a pass over again for every
+    // click target shown would double the cost of every bloom.
+    connect(effects, &EffectsHandler::stackingOrderChanged, this, [this]() {
+        if (!m_ownWindowChange) {
+            scheduleRelayout();
+        }
+    });
     // Fires both ways, so the same pass that stands the effect down brings it
     // back once the full screen effect is over; see standDown().
     connect(effects, &EffectsHandler::hasActiveFullScreenEffectChanged, this,
@@ -827,6 +823,14 @@ bool ThumbnailBloomEffect::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
         m_outlineDirty = true;
+        // The captions hold the colours of the scheme as well, and this one
+        // filter tells every store rather than each of them watching the
+        // application on its own.
+        for (auto &[w, state] : m_states) {
+            if (state.canvas) {
+                state.canvas->invalidateCaption();
+            }
+        }
         // Nothing else moves, so the frames of the thumbnails standing still
         // would keep the old colour until something did.
         effects->addRepaintFull();
@@ -837,9 +841,9 @@ bool ThumbnailBloomEffect::eventFilter(QObject *watched, QEvent *event)
 
 ThumbnailBloomEffect::~ThumbnailBloomEffect()
 {
-    // Destroying an overlay makes KWin drop its internal window and emit
+    // Destroying an input window makes KWin drop its internal window and emit
     // windowClosed synchronously, and that handler walks m_states: every
-    // handler touching the map must be gone before the map is destructed, or
+    // handler touching the map must be gone before the maps are destructed, or
     // forget() re-enters a container that is going away.
     disconnect(effects, nullptr, this, nullptr);
     disconnect(Cursors::self(), nullptr, this, nullptr);
@@ -966,7 +970,7 @@ void ThumbnailBloomEffect::relayout()
         for (auto &[w, state] : m_states) {
             retarget(w, w->isUserMove() ? frameRect(w) : QRectF(state.base));
         }
-        updateShields();
+        updateInputWindows();
         updateHover(effects->cursorPos());
         return;
     }
@@ -992,13 +996,18 @@ void ThumbnailBloomEffect::relayout()
     // Worked out once and handed to everything below: being ignored is the
     // larger half of being ineligible, it decides which window speaks for its
     // screen, and it is the half that can cost a screen lookup.
+    // Whether a window fills its screen is asked three times over by what
+    // follows, and each asking is a work area lookup, so it is asked once here.
+    std::vector<bool> maximized;
     std::vector<bool> ignored;
+    maximized.reserve(relevant.size());
     ignored.reserve(relevant.size());
     for (EffectWindow *w : relevant) {
-        ignored.push_back(isIgnored(w, parents));
+        maximized.push_back(isMaximized(w));
+        ignored.push_back(isIgnored(w, maximized.back(), parents));
     }
 
-    updateBackdropScreens(relevant, ignored);
+    updateBackdropScreens(relevant, ignored, maximized);
 
     // Windows only ever collide with windows of their own screen, so each screen
     // is laid out on its own. The stacking order is preserved per screen.
@@ -1006,8 +1015,8 @@ void ThumbnailBloomEffect::relayout()
     QHash<LogicalOutput *, QList<LayoutWindow>> perScreen;
     for (size_t i = 0; i < relevant.size(); ++i) {
         EffectWindow *w = relevant[i];
-        perScreen[w->screen()].append(LayoutWindow {
-            w, frameRect(w), isEligible(w, ignored[i]), w == active, ignored[i], isBackdrop(w) });
+        perScreen[w->screen()].append(LayoutWindow { w, frameRect(w), isEligible(w, ignored[i]),
+            w == active, ignored[i], maximized[i] && m_backdropScreens.contains(w->screen()) });
     }
 
     // Asked here and handed on rather than folded into the layout above: a grab
@@ -1135,9 +1144,9 @@ void ThumbnailBloomEffect::applyPlacements(
         retarget(w, diving ? QRectF(burstPoint(w->screen()), QSizeF(0, 0)) : frameRect(w));
     }
 
-    // Needs the final click targets of every thumbnail, so it comes after the
+    // Needs the final hit regions of every thumbnail, so it comes after the
     // whole layout rather than per window.
-    updateShields();
+    updateInputWindows();
 
     // The click targets have just been placed and moved, so the pointer can end
     // up on another thumbnail without having moved at all.
@@ -1316,7 +1325,7 @@ void ThumbnailBloomEffect::retarget(
     // where it is going to end up. The store is put up here as well, for a reason
     // of its own: both are windows, and a window may only be shown or hidden from
     // a relayout.
-    updateOverlay(w, state);
+    updateHitRegion(w, state);
     updateCanvas(w, state);
 
     if (inserted) {
@@ -1426,11 +1435,10 @@ void ThumbnailBloomEffect::openWindowMenu(EffectWindow *w, const QPointF &pos)
 
 void ThumbnailBloomEffect::updateHover(const QPointF &pos)
 {
-    // Everything with a placed click target takes part, animating or not: the
-    // click target sits on the destination of the thumbnail, so the hit test
-    // never follows it along its path.
-    const auto targetable
-        = [](const BloomState &state) { return state.overlay && state.overlay->isVisible(); };
+    // Everything with a hit region takes part, animating or not: the region
+    // sits on the destination of the thumbnail, so the hit test never follows
+    // it along its path.
+    const auto targetable = [](const BloomState &state) { return !state.hitRegion.isEmpty(); };
 
     // This runs on every step the pointer takes, for the whole life of the
     // session, and with nothing bloomed there is no thumbnail for one to arrive
@@ -1540,7 +1548,7 @@ EffectWindow *ThumbnailBloomEffect::thumbnailUnder(const QPointF &pos) const
     // strip would have it shrink and grow again in the middle of itself.
     EffectWindow *hovered = nullptr;
     for (const auto &[w, state] : m_states) {
-        if (state.overlay && state.overlay->isVisible() && state.hitRegion.contains(pos.toPoint())
+        if (state.hitRegion.contains(pos.toPoint())
             && (state.clicked || state.hovered || !m_shieldFilter.isCovered(w->window(), pos))
             && (!hovered || state.hovered)) {
             hovered = w;
@@ -1613,9 +1621,9 @@ void ThumbnailBloomEffect::standDown()
     }
 
     // Run on the empty set, which is what hands every window its own input back:
-    // the filter is left claiming nothing, so a press reaches whatever the effect
-    // now on the screen put there.
-    updateShields();
+    // the input windows come down and the filter is left claiming nothing, so a
+    // press reaches whatever the effect now on the screen put there.
+    updateInputWindows();
 }
 
 void ThumbnailBloomEffect::forget(EffectWindow *w)
@@ -1627,13 +1635,13 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
         m_menuPopup = nullptr;
     }
 
-    // Extracted rather than erased in place: destroying the overlay makes KWin
+    // Extracted rather than erased in place: destroying the store makes KWin
     // emit windowClosed for its internal window synchronously, and that handler
-    // calls back into m_states, which has to be consistent by then. The overlay
+    // calls back into m_states, which has to be consistent by then. The store
     // itself only dies on the next event loop pass, because this can run under
-    // input dispatch, where destroying an internal window is not survivable;
-    // its signals are cut right away so a click in the meantime cannot reach
-    // the window pointer that is about to go stale.
+    // input dispatch, where destroying an internal window is not survivable.
+    // The click target and the shield belong to the screen and stay; the hit
+    // region that goes with the state leaves their masks on the next pass.
     // The offscreen texture goes with the state. The window may already be gone
     // here (this also runs on windowClosed and windowDeleted), which is why the
     // flag is asked rather than the effect being told to unredirect blindly.
@@ -1654,14 +1662,9 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
 
     auto node = m_states.extract(w);
     if (!node.empty()) {
-        for (OverlayWindow *window :
-            { static_cast<OverlayWindow *>(node.mapped().overlay.release()),
-                static_cast<OverlayWindow *>(node.mapped().canvas.release()),
-                node.mapped().shield.release() }) {
-            if (window) {
-                window->disconnect();
-                window->deleteLater();
-            }
+        if (ThumbnailCanvas *canvas = node.mapped().canvas.release()) {
+            canvas->disconnect();
+            canvas->deleteLater();
         }
     }
 }
@@ -1702,14 +1705,8 @@ void ThumbnailBloomEffect::startThumbnailMove(EffectWindow *w, const QPointF &po
     }
 }
 
-void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
+void ThumbnailBloomEffect::updateHitRegion(EffectWindow *w, BloomState &state)
 {
-    // Only ever reached from the relayout pass: hiding an internal window makes
-    // KWin destroy it synchronously, which must not happen under pointer
-    // dispatch or under the effect chain.
-    //
-    // A window travelling back to its own geometry stops being a thumbnail, so
-    // it loses its click target right away rather than at the end of the trip.
     // The click target only claims what is actually visible of the thumbnail.
     // KWin hit tests an internal window against the mask of its QWindow, so
     // cutting the system elements out of that mask hands their own area back to
@@ -1725,19 +1722,16 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     // underneath, and the forwarded pointer goes with it.
     const QRectF claimed
         = state.clicked && !state.hoverRect.isEmpty() ? state.hoverRect : state.base;
-    const QRect rect = claimed.toAlignedRect();
-    state.hitRegion = QRegion(rect) - m_systemRegion;
+    state.hitRegion = QRegion(claimed.toAlignedRect()) - m_systemRegion;
 
-    // The growth reaches over the neighbouring thumbnails, and two click targets
-    // on the same pixel have no defined order, so the overlap is cut out of one
-    // of the two. It is cut out of the neighbours: the grown thumbnail is drawn
-    // over them, and where it is drawn is where its input belongs. A neighbour
-    // that ends up covered whole loses its click target for as long as the hold
-    // lasts, which is right, since nothing of it can be seen. The pointer
-    // reaches it again by leaving the grown rectangle, which is what ends the
-    // hold in the first place.
-    // At most one thumbnail is ever held that way: the hold belongs to the
-    // pointer's visit, and only one thumbnail is hovered at a time.
+    // The growth reaches over the neighbouring thumbnails, and the overlap is
+    // cut out of the neighbours: the grown thumbnail is drawn over them, and
+    // where it is drawn is where its input belongs. A neighbour that ends up
+    // covered whole loses its hit region for as long as the hold lasts, which
+    // is right, since nothing of it can be seen. The pointer reaches it again
+    // by leaving the grown rectangle, which is what ends the hold in the first
+    // place. At most one thumbnail is ever held that way: the hold belongs to
+    // the pointer's visit, and only one thumbnail is hovered at a time.
     if (!state.clicked) {
         for (const auto &[other, s] : m_states) {
             if (other != w && s.clicked && !s.hoverRect.isEmpty()) {
@@ -1749,43 +1743,53 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
     // Both ends of a thumbnail's life: the trip back to its own window and the
     // dive into the point its screen collapses to. Neither leaves anything to
     // click.
-    const bool leaving = sameRect(state.base, frameRect(w)) || state.diving;
-    if (leaving || state.hitRegion.isEmpty()) {
-        // Nothing is drawn on a click target, so one with nothing left to click
-        // has no reason to stay up: what is still fading out on the way home or
-        // into the burst point is the store, and that one lives on until the
-        // trip is over.
+    if (sameRect(state.base, frameRect(w)) || state.diving) {
         state.hitRegion = QRegion();
-        if (state.overlay) {
-            state.overlay->hide();
-        }
-        return;
     }
-
-    if (!state.overlay) {
-        state.overlay = std::make_unique<ThumbnailOverlay>();
-        connect(state.overlay.get(), &ThumbnailOverlay::activated, this,
-            [w]() { effects->activateWindow(w); });
-        connect(state.overlay.get(), &ThumbnailOverlay::dragStarted, this,
-            [this, w](const QPointF &pos, qint32 touchId) { startThumbnailMove(w, pos, touchId); });
-        // The menu command does not activate the window, which is the point: a
-        // right click is a question about the thumbnail, not a use of it.
-        connect(state.overlay.get(), &ThumbnailOverlay::menuRequested, this,
-            [this, w](const QPointF &pos) { openWindowMenu(w, pos); });
-    }
-
-    // The resting rectangle, never the current one: the click target must not
-    // travel with the animation, and never grows with the hover either.
-    state.overlay->setGeometry(rect);
-    setOverlayMask(state.overlay.get(), state.hitRegion.translated(-rect.topLeft()));
-    showOverlay(state.overlay.get());
 }
 
-void ThumbnailBloomEffect::updateShields()
+void ThumbnailBloomEffect::setOwnWindowVisible(QWindow *window, bool visible)
 {
     // Only ever reached from the relayout pass: showing and hiding internal
     // windows is not survivable under pointer dispatch or under the effect chain.
-    //
+    if (window->isVisible() == visible) {
+        return;
+    }
+
+    // Both restack, and KWin says so synchronously; the counter is what keeps
+    // that from scheduling the very pass this is running in over again.
+    ++m_ownWindowChange;
+    window->setVisible(visible);
+    // Hiding an internal window destroys the KWin::Window behind it, so every
+    // show makes a fresh one with the default flags back and has to take it
+    // out of the window lists again.
+    if (visible) {
+        hideFromWindowLists(window);
+    }
+    --m_ownWindowChange;
+}
+
+void ThumbnailBloomEffect::placeInputWindow(
+    OverlayWindow *window, const QRect &screen, const QRegion &mask)
+{
+    if (mask.isEmpty()) {
+        setOwnWindowVisible(window, false);
+        return;
+    }
+
+    // The geometry is the screen's and changes with nothing else, so the buffer
+    // behind the window is allocated and uploaded once per screen change rather
+    // than once per relayout. The mask is what moves, and KWin reads it live in
+    // its hit test without a buffer or a damage of its own.
+    if (window->geometry() != screen) {
+        window->setGeometry(screen);
+    }
+    setOverlayMask(window, mask.translated(-screen.topLeft()));
+    setOwnWindowVisible(window, true);
+}
+
+void ThumbnailBloomEffect::updateInputWindows()
+{
     // A bloomed window is painted somewhere else but keeps its real input
     // geometry, so hovering or clicking the area it vacated would still reach it.
     // A shield is an internal window put on that area: KWin hit tests internal
@@ -1815,13 +1819,10 @@ void ThumbnailBloomEffect::updateShields()
     // `covered` by the time the window is reached. Covering a window that lies
     // over a bloomed one would take away input that rightfully belongs to it.
     // What the thumbnails claim goes in at the start rather than being added to
-    // every answer: the region is handed to one shield after another as the walk
-    // goes down, and building the union again for each of them is a walk of the
-    // whole screen's worth of rectangles per bloomed window. It is the only thing
-    // `covered` is ever asked for, so the two are the same region.
+    // every answer: it is the only thing `covered` is ever asked for, so the two
+    // are the same region.
     QRegion covered = m_systemRegion + thumbnails;
     QRegion shieldRegion;
-    QSet<EffectWindow *> shielded;
     QSet<Window *> bloomedWindows;
     QSet<Window *> backdropWindows;
     const QList<EffectWindow *> stack = effects->stackingOrder();
@@ -1842,24 +1843,17 @@ void ThumbnailBloomEffect::updateShields()
         const auto sit = m_states.find(w);
 
         // Where the window is drawn is what marks it as bloomed, not what its
-        // thumbnail has left to click: one can be left with no click target at
+        // thumbnail has left to click: one can be left with no hit region at
         // all (buried under a panel, or covered whole by a grown neighbour) and
         // is still painted away from its own geometry, so its real place still
-        // has to be shielded. Same test as updateOverlay()'s `leaving`.
+        // has to be shielded. Same test as updateHitRegion()'s.
         if (sit != m_states.end() && !sit->second.diving
             && !sameRect(sit->second.base, frameRect(w))) {
-            BloomState &state = sit->second;
-
             // Every bloomed window has to be skipped when the input is handed
             // on, shielded or not: one that is covered everywhere still has to
             // stay out of the way under somebody else's shield.
             bloomedWindows.insert(w->window());
-
-            const QRegion exposed = placeShield(state, frame, covered);
-            if (!exposed.isEmpty()) {
-                shielded.insert(w);
-                shieldRegion += exposed;
-            }
+            shieldRegion += QRegion(frame) - covered;
         }
 
         // The bloomed window takes part as well: it is shielded where it is
@@ -1867,33 +1861,63 @@ void ThumbnailBloomEffect::updateShields()
         covered += frame;
     }
 
-    // Everything else drops its shield, the windows the loop never reached
-    // included: a window that got hidden or unbloomed must take its own input
-    // back immediately.
-    for (auto &[w, state] : m_states) {
-        if (state.shield && !shielded.contains(w)) {
-            state.shield->hide();
+    // One click target and one shield per screen, each cut to its screen. A
+    // screen that has gone takes its two windows with it; one that has nothing
+    // of either kind keeps them hidden.
+    const QList<LogicalOutput *> screens = effects->screens();
+    for (auto it = m_input.begin(); it != m_input.end();) {
+        if (screens.contains(it->first)) {
+            ++it;
+            continue;
         }
+        for (OverlayWindow *window :
+            { static_cast<OverlayWindow *>(it->second.target.release()),
+                it->second.shield.release() }) {
+            if (window) {
+                window->disconnect();
+                ++m_ownWindowChange;
+                delete window;
+                --m_ownWindowChange;
+            }
+        }
+        it = m_input.erase(it);
+    }
+    for (LogicalOutput *screen : screens) {
+        ScreenInput &input = m_input[screen];
+        const QRect geometry = screen->geometry();
+        if (!input.target) {
+            input.target = std::make_unique<ThumbnailOverlay>();
+            // Which thumbnail a gesture is on is answered from the hit regions,
+            // which is what the mask is the union of.
+            input.target->setResolver([this](const QPointF &pos) -> QObject * {
+                for (const auto &[w, state] : m_states) {
+                    if (state.hitRegion.contains(pos.toPoint())) {
+                        return w;
+                    }
+                }
+                return nullptr;
+            });
+            connect(input.target.get(), &ThumbnailOverlay::activated, this,
+                [](QObject *target) { effects->activateWindow(static_cast<EffectWindow *>(target)); });
+            connect(input.target.get(), &ThumbnailOverlay::dragStarted, this,
+                [this](QObject *target, const QPointF &pos, qint32 touchId) {
+                    startThumbnailMove(static_cast<EffectWindow *>(target), pos, touchId);
+                });
+            // The menu command does not activate the window, which is the point:
+            // a right click is a question about the thumbnail, not a use of it.
+            connect(input.target.get(), &ThumbnailOverlay::menuRequested, this,
+                [this](QObject *target, const QPointF &pos) {
+                    openWindowMenu(static_cast<EffectWindow *>(target), pos);
+                });
+        }
+        if (!input.shield) {
+            input.shield = std::make_unique<OverlayWindow>();
+        }
+        placeInputWindow(input.target.get(), geometry, thumbnails & geometry);
+        placeInputWindow(input.shield.get(), geometry, shieldRegion & geometry);
     }
 
     m_shieldFilter.setState(shieldRegion, bloomedWindows, thumbnailAreas, backdropWindows);
-}
-
-QRegion ThumbnailBloomEffect::placeShield(
-    BloomState &state, const QRect &frame, const QRegion &covered)
-{
-    const QRegion exposed = QRegion(frame) - covered;
-    if (exposed.isEmpty()) {
-        return exposed;
-    }
-    if (!state.shield) {
-        state.shield = std::make_unique<OverlayWindow>();
-    }
-    const QRect bounds = exposed.boundingRect();
-    state.shield->setGeometry(bounds);
-    setOverlayMask(state.shield.get(), exposed.translated(-bounds.topLeft()));
-    showOverlay(state.shield.get());
-    return exposed;
 }
 
 // ---------------------------------------------------------------------------
@@ -1948,7 +1972,8 @@ void ThumbnailBloomEffect::updateSystemRegion()
     }
 }
 
-bool ThumbnailBloomEffect::isIgnored(EffectWindow *w, const QSet<EffectWindow *> &parents) const
+bool ThumbnailBloomEffect::isIgnored(
+    EffectWindow *w, bool maximized, const QSet<EffectWindow *> &parents) const
 {
     if (m_skipKeepAbove && w->keepAbove()) {
         return true;
@@ -1956,7 +1981,7 @@ bool ThumbnailBloomEffect::isIgnored(EffectWindow *w, const QSet<EffectWindow *>
     if (m_skipOnAllDesktops && w->isOnAllDesktops()) {
         return true;
     }
-    if (m_skipMaximized && isMaximized(w)) {
+    if (m_skipMaximized && maximized) {
         return true;
     }
     if (m_skipChildren && w->transientFor()) {
@@ -1980,8 +2005,8 @@ bool ThumbnailBloomEffect::isEligible(EffectWindow *w, bool ignored) const
     return !ignored;
 }
 
-void ThumbnailBloomEffect::updateBackdropScreens(
-    const std::vector<EffectWindow *> &relevant, const std::vector<bool> &ignored)
+void ThumbnailBloomEffect::updateBackdropScreens(const std::vector<EffectWindow *> &relevant,
+    const std::vector<bool> &ignored, const std::vector<bool> &maximized)
 {
     // Kept for the diff at the end: a screen changing its mind is what makes
     // every thumbnail on it appear or disappear at once.
@@ -1999,8 +2024,7 @@ void ThumbnailBloomEffect::updateBackdropScreens(
     QSet<LogicalOutput *> settled;
     for (size_t i = relevant.size(); i-- > 0;) {
         EffectWindow *w = relevant[i];
-        const bool maximized = isMaximized(w);
-        if (ignored[i] && !maximized) {
+        if (ignored[i] && !maximized[i]) {
             continue;
         }
 
@@ -2019,7 +2043,7 @@ void ThumbnailBloomEffect::updateBackdropScreens(
         // is kept. A maximized speaker leaves the old point standing: the
         // thumbnails that are about to disappear belong to the arrangement it
         // replaced, and that is where they came from.
-        if (!maximized) {
+        if (!maximized[i]) {
             m_backdropScreens.insert(screen);
             m_screenFocus[screen] = frameRect(w).center();
         }
@@ -2520,17 +2544,20 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         state.painted = paintedArea(w, state);
 
         // Where the thumbnail was and where it now is, so that the frame erases
-        // the one and draws the other. The two are taken together rather than as
-        // a pair, which covers the ground between them as well: a thumbnail
-        // moves in a straight line, and a step large enough to leave a gap would
-        // otherwise leave a trail in it.
+        // the one and draws the other. As two rectangles, not as the one around
+        // both: nothing was ever drawn on the ground between them, since every
+        // step's `before` is the `painted` of the step before it and the ledger
+        // below carries every step a screen has missed, so there is nothing
+        // there to erase. The rectangle around both is most of the screen for a
+        // thumbnail crossing it, on every frame of the trip.
         //
         // The frame a trip ends on is measured like every other one, and before
         // the state is dropped rather than after: that step moves the thumbnail
         // as far as the one before it did, and what it leaves behind is painted
         // by this pass or by nothing at all.
         if (moving) {
-            m_moved += before.united(state.painted).toAlignedRect();
+            m_moved += before.toAlignedRect();
+            m_moved += state.painted.toAlignedRect();
             m_moved += state.base.toAlignedRect();
         }
 
@@ -3069,7 +3096,7 @@ void ThumbnailBloomEffect::updateCanvas(EffectWindow *w, BloomState &state)
     const bool leaving = sameRect(state.base, frameRect(w)) || state.diving;
     if (leaving && state.caption.current <= 0.0 && state.highlight.current <= 0.0) {
         if (state.canvas) {
-            state.canvas->hide();
+            setOwnWindowVisible(state.canvas.get(), false);
             state.canvasWindow = nullptr;
         }
         return;
@@ -3102,7 +3129,7 @@ void ThumbnailBloomEffect::updateCanvas(EffectWindow *w, BloomState &state)
     // store put up for the first time is already on its thumbnail when it is
     // shown.
     refreshCanvas(w, state);
-    showOverlay(state.canvas.get());
+    setOwnWindowVisible(state.canvas.get(), true);
 
     // Every show() makes a fresh window of the store, so the one the scene knows
     // is picked up here rather than looked up again on every frame that draws

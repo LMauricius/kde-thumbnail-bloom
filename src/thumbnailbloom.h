@@ -42,8 +42,9 @@ class ThumbnailOverlay;
  * Shows covered inactive windows as thumbnails on the nearest free space.
  *
  * Windows are never really moved or resized: they are painted scaled down and
- * translated, and a transparent click target (ThumbnailOverlay) is put on top
- * of each finished thumbnail so that it can be clicked into focus. The frame
+ * translated, and a transparent click target (ThumbnailOverlay, one per screen,
+ * masked to the thumbnails) lies over them so that they can be clicked into
+ * focus. The frame
  * around a thumbnail and the caption on it are painted by one window of their
  * own (ThumbnailCanvas), which is the only surface of the effect that is ever
  * drawn.
@@ -147,7 +148,7 @@ private:
 
     /*!
      * Everything the effect keeps around for one bloomed window: where its
-     * thumbnail travels from and to, and its click target.
+     * thumbnail travels from and to, what it answers for, and its store.
      */
     struct BloomState
     {
@@ -195,15 +196,27 @@ private:
         //! Whether the channels have moved on since the store was last handed them.
         bool canvasStale = true;
         KWin::TimeLine timeline;
-        std::unique_ptr<ThumbnailOverlay> overlay; //!< the click target, which takes input and
-            //!< draws nothing
         //! Store the frame and the caption of the thumbnail are painted in, and the one surface
         //! of the effect's own that is drawn at all.
         std::unique_ptr<ThumbnailCanvas> canvas;
         QPointer<KWin::EffectWindow>
             canvasWindow; //!< that store as the scene knows it, while it is shown
-        std::unique_ptr<OverlayWindow>
-            shield; //!< swallows the input the vacated real geometry would still get
+    };
+
+    /*!
+     * The two input windows of one screen: the click target over its thumbnails
+     * and the shield over the real places of its bloomed windows.
+     *
+     * One pair per screen rather than one per thumbnail. Both are kept at the
+     * geometry of the screen and only their masks move, which KWin reads live in
+     * the hit test and which costs no buffer: a window resized on every relayout
+     * is a buffer reallocated, cleared, uploaded and damaged for every one of
+     * them, and a shield is as large as the window it stands in for.
+     */
+    struct ScreenInput
+    {
+        std::unique_ptr<ThumbnailOverlay> target; //!< takes the gestures of every thumbnail
+        std::unique_ptr<OverlayWindow> shield; //!< swallows the input the vacated geometry would get
     };
 
     /*!
@@ -459,12 +472,16 @@ private:
     void drawCanvas(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         BloomState &state, const KWin::Region &deviceRegion);
     /*!
-     * Puts the click target of \a w on its resting rectangle, or hides it.
+     * Works out what the thumbnail of \a w answers for (BloomState::hitRegion):
+     * its resting rectangle, or the whole enlarged one once a click has landed
+     * on it, less the system elements and the enlarged neighbour holding the
+     * pointer. Empty for a window on its way home or into the burst point.
      *
-     * Input and nothing else: it is left out of every paint pass, and what is
-     * drawn on a thumbnail belongs to its store (updateCanvas()).
+     * Input and nothing else: the click target of the screen takes the union of
+     * these as its mask (updateInputWindows()), and what is drawn on a thumbnail
+     * belongs to its store (updateCanvas()).
      */
-    void updateOverlay(KWin::EffectWindow *w, BloomState &state);
+    void updateHitRegion(KWin::EffectWindow *w, BloomState &state);
     /*! Puts the store of \a w up with its caption, or takes it down. */
     void updateCanvas(KWin::EffectWindow *w, BloomState &state);
     /*!
@@ -494,21 +511,37 @@ private:
      * keeps it from having to be drawn again, shadows and all, on every frame.
      */
     void refreshCanvas(KWin::EffectWindow *w, BloomState &state);
-    /*! Puts a shield on the part of every bloomed window that would still take input. */
-    void updateShields();
     /*!
-     * Puts \a state's shield over the part of \a frame not in \a covered, and
-     * returns that part. An empty result places nothing and leaves any old
-     * shield alone; updateShields() drops the stale ones in one place.
+     * Places the click target and the shield of every screen: the first over the
+     * hit regions of the thumbnails, the second over the part of every bloomed
+     * window that would still take input. Hands the filter the same regions.
      */
-    QRegion placeShield(BloomState &state, const QRect &frame, const QRegion &covered);
+    void updateInputWindows();
+    /*!
+     * Keeps \a window at \a screen's geometry with \a mask as its input region,
+     * showing it on the way; hides it when the mask is empty, which is when
+     * that screen has nothing of the kind.
+     */
+    void placeInputWindow(OverlayWindow *window, const QRect &screen, const QRegion &mask);
+    /*!
+     * Shows or hides \a window, one of the effect's own, without the stacking
+     * change that makes running a layout pass over again: the effect's windows
+     * are no input to the layout, and the pass that put them up has just run.
+     */
+    void setOwnWindowVisible(QWindow *window, bool visible);
 
     // --- window classification ---
 
     /*! Whether \a w takes part in the layout at all (as thumbnail or as obstacle). */
     bool isRelevant(KWin::EffectWindow *w) const;
-    /*! Whether the settings exempt \a w from the effect, so that it neither blooms nor makes others bloom. */
-    bool isIgnored(KWin::EffectWindow *w, const QSet<KWin::EffectWindow *> &parents) const;
+    /*!
+     * Whether the settings exempt \a w from the effect, so that it neither
+     * blooms nor makes others bloom; \a maximized is isMaximized(w), worked out
+     * once by the caller, since it costs a work area lookup and the layout asks
+     * for it three times per window.
+     */
+    bool isIgnored(
+        KWin::EffectWindow *w, bool maximized, const QSet<KWin::EffectWindow *> &parents) const;
     /*!
      * Whether \a w may be turned into a thumbnail, \a ignored saying whether the
      * settings exempt it. That half is worked out by the caller, which needs the
@@ -551,8 +584,8 @@ private:
      * burst comes out of, which a maximized speaker then keeps rather than
      * replaces (see burstPoint()).
      */
-    void updateBackdropScreens(
-        const std::vector<KWin::EffectWindow *> &relevant, const std::vector<bool> &ignored);
+    void updateBackdropScreens(const std::vector<KWin::EffectWindow *> &relevant,
+        const std::vector<bool> &ignored, const std::vector<bool> &maximized);
     /*!
      * Whether \a w is one of the effect's own surfaces: a store, a click target
      * or a shield.
@@ -574,6 +607,10 @@ private:
     void watch(KWin::EffectWindow *w);
 
     std::unordered_map<KWin::EffectWindow *, BloomState> m_states;
+    std::unordered_map<KWin::LogicalOutput *, ScreenInput> m_input; //!< see ScreenInput
+    //! Nonzero while one of the effect's own windows is being shown or hidden; see
+    //! setOwnWindowVisible().
+    int m_ownWindowChange = 0;
     QTimer m_relayoutTimer;
     std::chrono::milliseconds m_animationDuration { 250 };
     bool m_showIcons = true;

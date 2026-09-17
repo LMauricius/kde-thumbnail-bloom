@@ -10,6 +10,7 @@
 #include <QIcon>
 #include <QImage>
 #include <QPointF>
+#include <QPointer>
 #include <QRasterWindow>
 #include <QRectF>
 #include <QRegion>
@@ -18,6 +19,7 @@
 #include <QTimer>
 
 #include <array>
+#include <functional>
 
 namespace ThumbnailBloom {
 
@@ -163,9 +165,18 @@ public:
      */
     QRegion paintedRegion() const;
 
+    /*!
+     * Drops the rendered caption, so that the next paint makes it again.
+     *
+     * Called by the effect on a colour scheme change, which in Qt 6 is announced
+     * to the application object alone: the effect watches that once for every
+     * store, rather than every store installing a filter of its own on every
+     * event the compositor handles.
+     */
+    void invalidateCaption();
+
 protected:
     void paintEvent(QPaintEvent *event) override;
-    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     /*!
@@ -182,8 +193,6 @@ private:
      * kept and only stamped from then on.
      */
     void renderCaption();
-    /*! Drops the rendered caption, so that the next paint makes it again. */
-    void invalidateCaption();
     /*!
      * Everything a paint would put on the store as it stands, in window
      * coordinates: the band of the frame and the strip of the caption.
@@ -217,13 +226,23 @@ private:
 };
 
 /*!
- * The click target placed exactly on top of a thumbnail.
+ * The click target laid over every thumbnail of one screen.
  *
- * It covers the thumbnail's rectangle and turns the gestures it swallows into
- * the three things a thumbnail can do: activate its window, drag it out of the
- * thumbnail, or open its window menu. It draws nothing whatsoever: the picture
- * is the effect's, and the frame and the caption over it belong to
- * ThumbnailCanvas.
+ * One window per screen rather than one per thumbnail, kept at the geometry of
+ * the screen and given the union of the thumbnail hit regions as its mask: KWin
+ * reads the mask of an internal window live in its hit test and the QPA has no
+ * mask of its own, so moving the thumbnails costs a mask and nothing else. A
+ * window per thumbnail would be a buffer per thumbnail, and one that is resized
+ * on every relayout is a buffer reallocated, cleared, uploaded and damaged for
+ * every one of them.
+ *
+ * It turns the gestures it swallows into the three things a thumbnail can do:
+ * activate its window, drag it out of the thumbnail, or open its window menu.
+ * Which thumbnail a gesture is on is asked of the resolver the moment it begins
+ * (the press, or the first finger down), and the answer travels with the
+ * gesture, so a relayout between press and release cannot hand it to another
+ * thumbnail. It draws nothing whatsoever: the picture is the effect's, and the
+ * frame and the caption over it belong to ThumbnailCanvas.
  *
  * A press never decides anything on its own; only what follows it does. The
  * pointer keeps its focus on this window for as long as a button is down
@@ -235,8 +254,14 @@ class ThumbnailOverlay : public OverlayWindow
     Q_OBJECT
 
 public:
+    /*! Answers which thumbnail (as an opaque object) holds a screen position, or null. */
+    using Resolver = std::function<QObject *(const QPointF &)>;
+
     ThumbnailOverlay();
     ~ThumbnailOverlay() override;
+
+    /*! Sets what a gesture beginning at a position is aimed at. */
+    void setResolver(Resolver resolver);
 
     /*!
      * Gives up the touch sequence being followed, so that nothing comes of it.
@@ -249,17 +274,17 @@ public:
     void cancelTouch();
 
 Q_SIGNALS:
-    /*! A click or a tap finished on the thumbnail without turning into a drag. */
-    void activated();
+    /*! A click or a tap finished on \a target without turning into a drag. */
+    void activated(QObject *target);
     /*!
-     * The press on the thumbnail travelled far enough to become a move.
+     * The press on \a target travelled far enough to become a move.
      *
      * \a pos is where the pointer or the finger is now, and \a touchId the id
      * of the touch point driving it, or -1 for the pointer.
      */
-    void dragStarted(const QPointF &pos, qint32 touchId);
-    /*! The window menu was asked for at \a pos, by a right click or a long touch. */
-    void menuRequested(const QPointF &pos);
+    void dragStarted(QObject *target, const QPointF &pos, qint32 touchId);
+    /*! The window menu of \a target was asked for at \a pos, by a right click or a long touch. */
+    void menuRequested(QObject *target, const QPointF &pos);
 
 protected:
     bool event(QEvent *event) override;
@@ -273,6 +298,9 @@ private:
     /*! Ends the tracked touch sequence: no tap or long press can come of it any more. */
     void resetTouch();
 
+    Resolver m_resolver;
+    //! What the running gesture is aimed at; a QPointer, since the window can close under it.
+    QPointer<QObject> m_target;
     QPointF m_pressOrigin; //!< where the left button went down
     bool m_pressed = false; //!< whether a left press is still undecided
 

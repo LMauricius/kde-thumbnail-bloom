@@ -542,7 +542,6 @@ ThumbnailCanvas::ThumbnailCanvas()
     // The rendered caption holds the colours of the scheme and the size of the
     // pixels it was made at, so both have to drop it.
     connect(this, &QWindow::screenChanged, this, [this](QScreen *) { invalidateCaption(); });
-    qApp->installEventFilter(this);
 }
 
 QRectF ThumbnailCanvas::shownRect() const { return m_shown; }
@@ -728,17 +727,6 @@ void ThumbnailCanvas::renderCaption()
     m_captionBand = band.translated(-QPointF(m_restSize.width() / 2, m_restSize.height()));
 }
 
-bool ThumbnailCanvas::eventFilter(QObject *watched, QEvent *event)
-{
-    // In Qt 6 the palette change reaches the application object and nothing
-    // else, so that is where a colour scheme change has to be picked up from.
-    if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
-        invalidateCaption();
-    }
-
-    return OverlayWindow::eventFilter(watched, event);
-}
-
 void ThumbnailCanvas::paintEvent(QPaintEvent *event)
 {
     renderCaption();
@@ -812,12 +800,16 @@ ThumbnailOverlay::ThumbnailOverlay()
     connect(&m_longPressTimer, &QTimer::timeout, this, [this]() {
         if (m_touchArmed) {
             m_touchArmed = false;
-            Q_EMIT menuRequested(m_touchOrigin);
+            if (m_target) {
+                Q_EMIT menuRequested(m_target, m_touchOrigin);
+            }
         }
     });
 }
 
 ThumbnailOverlay::~ThumbnailOverlay() = default;
+
+void ThumbnailOverlay::setResolver(Resolver resolver) { m_resolver = std::move(resolver); }
 
 void ThumbnailOverlay::cancelTouch() { resetTouch(); }
 
@@ -842,8 +834,13 @@ bool ThumbnailOverlay::event(QEvent *event)
         if (!m_touchArmed && !points.isEmpty()) {
             m_touchId = points.first().id();
             m_touchOrigin = points.first().globalPosition();
-            m_touchArmed = true;
-            m_longPressTimer.start();
+            // Settled once, where the finger landed: the answer rides the
+            // sequence, so a relayout under it changes nothing.
+            m_target = m_resolver ? m_resolver(m_touchOrigin) : nullptr;
+            m_touchArmed = m_target != nullptr;
+            if (m_touchArmed) {
+                m_longPressTimer.start();
+            }
         }
         break;
     }
@@ -857,14 +854,18 @@ bool ThumbnailOverlay::event(QEvent *event)
             // here on the sequence is driven by the effect's own touch filter,
             // because KWin's move filter only follows a point it saw go down.
             resetTouch();
-            Q_EMIT dragStarted(point.globalPosition(), m_touchId);
+            if (m_target) {
+                Q_EMIT dragStarted(m_target, point.globalPosition(), m_touchId);
+            }
             break;
         }
         break;
     case QEvent::TouchEnd:
         if (m_touchArmed) {
             resetTouch();
-            Q_EMIT activated();
+            if (m_target) {
+                Q_EMIT activated(m_target);
+            }
         }
         break;
     case QEvent::TouchCancel:
@@ -886,13 +887,25 @@ void ThumbnailOverlay::mousePressEvent(QMouseEvent *event)
 {
     event->accept();
 
+    // Which thumbnail is asked once, at the press: the window keeps the pointer
+    // focus for as long as the button is down, so the rest of the gesture lands
+    // here whatever the relayouts in between do to the mask.
+    if (event->button() != Qt::LeftButton && event->button() != Qt::RightButton) {
+        return;
+    }
+    m_target = m_resolver ? m_resolver(event->globalPosition()) : nullptr;
+    if (!m_target) {
+        m_pressed = false;
+        return;
+    }
+
     // The left button decides nothing yet: what happens next (a release or a
     // move) is what tells an activation from a drag apart.
     if (event->button() == Qt::LeftButton) {
         m_pressed = true;
         m_pressOrigin = event->globalPosition();
-    } else if (event->button() == Qt::RightButton) {
-        Q_EMIT menuRequested(event->globalPosition());
+    } else {
+        Q_EMIT menuRequested(m_target, event->globalPosition());
     }
 }
 
@@ -906,7 +919,9 @@ void ThumbnailOverlay::mouseMoveEvent(QMouseEvent *event)
     // The current position, not the one the press started at: the window is
     // grabbed where the pointer is, so it does not jump by the drag threshold.
     m_pressed = false;
-    Q_EMIT dragStarted(event->globalPosition(), -1);
+    if (m_target) {
+        Q_EMIT dragStarted(m_target, event->globalPosition(), -1);
+    }
 }
 
 void ThumbnailOverlay::mouseReleaseEvent(QMouseEvent *event)
@@ -914,7 +929,9 @@ void ThumbnailOverlay::mouseReleaseEvent(QMouseEvent *event)
     event->accept();
     if (event->button() == Qt::LeftButton && m_pressed) {
         m_pressed = false;
-        Q_EMIT activated();
+        if (m_target) {
+            Q_EMIT activated(m_target);
+        }
     }
 }
 
