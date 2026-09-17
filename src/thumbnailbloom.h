@@ -336,8 +336,8 @@ private:
      */
     bool refreshSnapshot(KWin::EffectWindow *w, BloomState &state);
     /*!
-     * The shader a thumbnail is drawn with, built on the first draw that wants
-     * it, or nothing at all if the scene cannot compile it.
+     * The shader a thumbnail at rest is drawn with, built on the first draw
+     * that wants it, or nothing at all if the scene cannot compile it.
      *
      * Kept by the effect rather than by the window: it holds no state of its
      * own, and one of it serves every thumbnail on every screen.
@@ -346,9 +346,15 @@ private:
     /*!
      * Draws the store of \a state where \a quads put it.
      *
-     * What the scene does for an ordinary window, in the same terms: the stock
-     * shader, the same uniforms, the same blending and the same clipping, with
-     * the store standing in for the window's own texture.
+     * What the scene does for an ordinary window, in the same terms: the same
+     * uniforms, the same blending and the same clipping, with the store
+     * standing in for the window's own texture.
+     *
+     * Which shader draws it is decided here. A thumbnail standing still, at its
+     * resting rectangle or grown to the full of a hover, is worth the filtering
+     * shader; one on a trip is drawn by the stock one, a single sample off the
+     * mip chain, since nothing the filter works out can be made out on a moving
+     * picture and every step of a trip repaints.
      */
     void paintSnapshot(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         KWin::EffectWindow *w, BloomState &state, const KWin::Region &deviceRegion,

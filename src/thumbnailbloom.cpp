@@ -81,7 +81,7 @@ static qreal deviceScale(const EffectWindow *w)
 }
 
 /*!
- * The fragment shader a thumbnail is drawn with.
+ * The fragment shader a thumbnail at rest is drawn with.
  *
  * KWin's own shader for a window under the traits paintSnapshot() asks for,
  * with one thing changed: where it takes a single sample of the texture, this
@@ -114,6 +114,11 @@ static qreal deviceScale(const EffectWindow *w)
  * borrows a level, where the texels in the middle of its footprint are already
  * the averages it would have worked out and only the two at either end are
  * taken as evenly filled.
+ *
+ * A thumbnail in motion is drawn by the stock shader instead, which takes a
+ * single sample off the same chain. What this works out is a good deal more
+ * than a moving picture can show, and the steps of a trip are where it can
+ * least be afforded, every one of them being a repaint. See paintSnapshot().
  */
 static constexpr char filterFragmentSource[] = R"GLSL(
 uniform sampler2D sampler;
@@ -231,10 +236,10 @@ void main()
  *
  * One for the picture itself and one for every halving of it down to a single
  * pixel, which is the whole chain. The shader above reaches for a level only
- * once a thumbnail is drawn below a quarter of its window's size, and the plain
- * trilinear fallback reaches for all of them, so the tail is worth having
- * either way: every level but the first is a quarter of the one above it, which
- * makes the whole chain a third of the picture again.
+ * once a thumbnail is drawn below a sixth of its window's size, while the
+ * trilinear path every thumbnail in motion takes reaches for all of them, so
+ * the tail earns its keep either way: every level but the first is a quarter of
+ * the one above it, which makes the whole chain a third of the picture again.
  */
 static int mipLevels(const QSize &size)
 {
@@ -2097,7 +2102,23 @@ void ThumbnailBloomEffect::paintSnapshot(const RenderTarget &renderTarget,
     // have been: the same modulation, the same saturation and the same colour
     // space, whatever the screen it is going onto turns out to want. They take
     // the same uniforms for that reason.
-    GLShader *shader = filterShader();
+    //
+    // Which of the two draws this frame is a question of whether the thumbnail
+    // is standing still. Weighing every pixel out of the picture texel by texel
+    // is worth its cost on a thumbnail that is being looked at, where a
+    // crawling edge or a letter coming out thick in one place and thin in the
+    // next is plain to see; it is worth nothing on one crossing the screen,
+    // which moves too fast for any of that to be made out, and the steps of a
+    // trip are exactly where the cost tells, each of them being a repaint. So a
+    // trip is drawn with the stock shader, which takes one sample off the mip
+    // chain the store carries anyway: soft, but steady, and a single tap.
+    //
+    // The sharp filter comes back on the step the trip ends on rather than a
+    // frame later, since advanceAnimations() damages that step like any other
+    // and the timeline is already done by the time it is painted. Both ends of
+    // a hover are such an arrival, the grown rectangle under the pointer as
+    // much as the resting one.
+    GLShader *shader = state.timeline.done() ? filterShader() : nullptr;
     if (!shader) {
         shader = ShaderManager::instance()->shader(ShaderTrait::MapTexture | ShaderTrait::Modulate
             | ShaderTrait::AdjustSaturation | ShaderTrait::TransformColorspace);
