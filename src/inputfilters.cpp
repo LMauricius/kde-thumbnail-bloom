@@ -575,6 +575,19 @@ void ShieldFilter::setClickHandler(std::function<void(Window *)> handler)
     m_clicked = std::move(handler);
 }
 
+void ShieldFilter::setEngageHandler(std::function<void(Window *)> handler)
+{
+    m_engaged = std::move(handler);
+}
+
+void ShieldFilter::engage(const Thumbnail &thumbnail, const QPointF &pos)
+{
+    m_forwarder.enter(thumbnail.window, pos);
+    if (m_engaged) {
+        m_engaged(thumbnail.window);
+    }
+}
+
 void ShieldFilter::updateForwardedPointer(const QPointF &pos)
 {
     Window *held = m_forwarder.pointerWindow();
@@ -622,7 +635,7 @@ bool ShieldFilter::beginGesture()
         return false;
     }
 
-    m_forwarder.enter(thumbnail->window, InputForwarder::windowCentre(thumbnail->window));
+    engage(*thumbnail, InputForwarder::windowCentre(thumbnail->window));
     return m_forwarder.pointerWindow() != nullptr;
 }
 
@@ -690,7 +703,7 @@ bool ShieldFilter::pointerButton(PointerButtonEvent *event)
         if (!thumbnail) {
             return false;
         }
-        m_forwarder.enter(thumbnail->window, mapToWindow(*thumbnail, event->position));
+        engage(*thumbnail, mapToWindow(*thumbnail, event->position));
         m_forwarder.button(event->button, event->state);
         if (m_clicked) {
             m_clicked(thumbnail->window);
@@ -721,7 +734,7 @@ bool ShieldFilter::pointerAxis(PointerAxisEvent *event)
     // A scroll acts on the view rather than on a spot in it, so it is put into
     // the middle of the window. A motion event has normally set this up already;
     // a wheel turned without the pointer having moved gets it done here.
-    m_forwarder.enter(thumbnail->window, InputForwarder::windowCentre(thumbnail->window));
+    engage(*thumbnail, InputForwarder::windowCentre(thumbnail->window));
     m_forwarder.axis(event);
     return true;
 }

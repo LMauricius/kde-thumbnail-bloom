@@ -232,8 +232,25 @@ public:
      */
     void setClickHandler(std::function<void(KWin::Window *)> handler);
 
+    /*!
+     * Sets what to call when input aimed at a thumbnail has been put into the
+     * window it shows: a scroll, a touchpad gesture, or a button the thumbnail
+     * keeps nothing of its own for. Asking the window for something through its
+     * thumbnail is aiming at that thumbnail, so it stands in for the pointer
+     * arriving on it. Touch is left out, a finger saying nothing about where the
+     * cursor is.
+     */
+    void setEngageHandler(std::function<void(KWin::Window *)> handler);
+
     /*! Returns the thumbnail that can act at \a pos, if there is one. */
     const Thumbnail *usableThumbnailAt(const QPointF &pos) const;
+
+    /*!
+     * Puts the pointer into \a thumbnail's window at \a pos and tells the effect
+     * the thumbnail was aimed at. Every route into the window goes through here,
+     * so nothing can reach a window without its thumbnail hearing of it.
+     */
+    void engage(const Thumbnail &thumbnail, const QPointF &pos);
 
     bool pointerMotion(KWin::PointerMotionEvent *event) override;
     bool pointerButton(KWin::PointerButtonEvent *event) override;
@@ -328,6 +345,7 @@ private:
     QList<PendingTouch> m_pendingTouches;
     std::function<void(KWin::Window *)> m_touchTakenOver;
     std::function<void(KWin::Window *)> m_clicked;
+    std::function<void(KWin::Window *)> m_engaged;
 };
 
 /*!

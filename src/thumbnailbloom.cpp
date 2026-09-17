@@ -676,6 +676,11 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
         }
     });
 
+    // Input put into the window through its thumbnail is the user aiming at that
+    // thumbnail, which is what a thumbnail bloomed under a resting cursor is
+    // waiting for before it may grow.
+    m_shieldFilter.setEngageHandler([this](Window *window) { engage(window); });
+
     // A second finger on a thumbnail means the gesture is for the window, so the
     // click target has to let go of the one it was following.
     m_shieldFilter.setTouchTakenOverHandler([this](Window *window) {
@@ -754,6 +759,11 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
                 updateHover(effects->cursorPos());
             }
         });
+
+    // Wherever the pointer already is counts as where it was, so the first
+    // thumbnail to bloom under a cursor that has not moved yet is sat on rather
+    // than arrived at, like any other.
+    m_hoverPos = effects->cursorPos();
 
     for (EffectWindow *w : effects->stackingOrder()) {
         watch(w);
@@ -1366,10 +1376,11 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
         return;
     }
 
-    // The menu of a thumbnail belongs to that thumbnail. It is a popup, so it
-    // takes the pointer and is cut out of the hit region, and the thumbnail
-    // would shrink away under its own menu; it stays focused until the menu is
-    // gone instead. The menu closing is a window closing, which schedules the
+    // The menu of a thumbnail belongs to that thumbnail, and opening it is
+    // aiming at it exactly as a scroll is, so it takes the hover whether or not
+    // the pointer had arrived on it first. It is a popup, so it takes the
+    // pointer and is cut out of the hit region, and the thumbnail would shrink
+    // away under its own menu; it stays hovered until the menu is gone instead. The menu closing is a window closing, which schedules the
     // relayout that ends this.
     if (EffectWindow *owner = menuOwner()) {
         for (const auto &[w, state] : m_states) {
@@ -1390,7 +1401,27 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
         return;
     }
 
+    // A hover has to be arrived at. The pointer being on a thumbnail is not the
+    // same as its having come to one: a window raised under a resting cursor
+    // puts a thumbnail there without the pointer moving at all, and a picture
+    // that jumps out from under the cursor is the one thing nobody asked for. So
+    // a hover only ever starts on a step that crosses into the thumbnail, which
+    // is what the step before says. A pointer that has not moved makes the two
+    // the same point and can start nothing; one that left the thumbnail and came
+    // back has the step before outside it, and the hover begins as it always
+    // did. A hover already running is never asked the question again: it was
+    // arrived at once and keeps the pointer for as long as it stays on.
+    // A drag is the exception, as it is to the held button above: it is going
+    // somewhere, so it lights up what it rests on however that got there.
     EffectWindow *hovered = thumbnailUnder(pos);
+    if (hovered && !dragInProgress()) {
+        const BloomState &state = m_states.at(hovered);
+        if (!state.hovered && state.hitRegion.contains(m_hoverPos.toPoint())) {
+            hovered = nullptr;
+        }
+    }
+    m_hoverPos = pos;
+
     for (const auto &[w, state] : m_states) {
         if (targetable(state)) {
             setHovered(w, w == hovered);
@@ -1449,6 +1480,18 @@ void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
     // it right away, under the very code that is still using it. The relayout
     // timer moves that to a safe point of the event loop instead.
     scheduleRelayout();
+}
+
+void ThumbnailBloomEffect::engage(Window *window)
+{
+    // The thumbnail the input went through is the one under the pointer, and the
+    // rest are left to updateHover(): the hit regions never overlap, so none of
+    // them can be hovered at this moment anyway. Reduced motion holds this back
+    // exactly as it holds back a pointer arriving the ordinary way.
+    EffectWindow *const w = window ? window->effectWindow() : nullptr;
+    if (w && !layoutFrozen()) {
+        setHovered(w, true);
+    }
 }
 
 void ThumbnailBloomEffect::standDown()

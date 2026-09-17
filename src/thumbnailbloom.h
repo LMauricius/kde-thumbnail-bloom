@@ -285,6 +285,15 @@ private:
     /*! Marks the thumbnail of \a w as hovered or not and animates it accordingly. */
     void setHovered(KWin::EffectWindow *w, bool hovered);
     /*!
+     * Hovers the thumbnail of \a window because input was aimed at it.
+     *
+     * Asking the window for something through its thumbnail is the arrival
+     * updateHover() would otherwise wait for, and waiting is not an option: a
+     * wheel makes no motion event at all, and a button going down freezes the
+     * hover for as long as it is held.
+     */
+    void engage(KWin::Window *window);
+    /*!
      * Activates \a w and hands it to the interactive move, with \a pos held.
      *
      * The window is put where its thumbnail is before the move begins, so that
@@ -582,6 +591,9 @@ private:
     KWin::EffectWindow *m_menuOwner
         = nullptr; //!< window whose menu is open, kept focused meanwhile
     KWin::EffectWindow *m_menuPopup = nullptr; //!< the menu itself, watched for its closing
+    //! Where the pointer was the last time the hover was worked out, which is what says whether
+    //! a hover is being arrived at or merely sat on; see updateHover().
+    QPointF m_hoverPos;
     LiftGroup m_liftedBelow; //!< the ones at rest, drawn no higher than the window covering them
     LiftGroup m_liftedAbove; //!< the ones being resized by a hover or a trip, drawn over the rest
     bool m_skipKeepAbove = true;
