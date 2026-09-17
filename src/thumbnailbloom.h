@@ -208,6 +208,17 @@ private:
     /*! Rebuilds the layout of every screen and retargets the animations. */
     void relayout();
     /*!
+     * Takes the whole effect off the screen at once, dropping every thumbnail
+     * where it stands rather than sending it home.
+     *
+     * For as long as a full screen effect is running, that effect is what the
+     * session looks like. It animates each window from the rectangle the window
+     * really occupies, which a thumbnail never changes, and there is no way for
+     * one effect to tell another where it is painting; so the bloom cannot be
+     * met half way and gets out of the way instead.
+     */
+    void standDown();
+    /*!
      * Returns every window one of \a relevant is transient for, which is what
      * the "skip parents" setting works on.
      */

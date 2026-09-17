@@ -720,6 +720,10 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
         [this](EffectWindow *) { scheduleRelayout(); });
     connect(effects, &EffectsHandler::stackingOrderChanged, this,
         &ThumbnailBloomEffect::scheduleRelayout);
+    // Fires both ways, so the same pass that stands the effect down brings it
+    // back once the full screen effect is over; see standDown().
+    connect(effects, &EffectsHandler::hasActiveFullScreenEffectChanged, this,
+        &ThumbnailBloomEffect::scheduleRelayout);
     // No per-window signal exists for the "show desktop" hidden flag.
     connect(effects, &EffectsHandler::showingDesktopChanged, this,
         [this](bool) { scheduleRelayout(); });
@@ -864,6 +868,18 @@ void ThumbnailBloomEffect::scheduleRelayout() { m_relayoutTimer.start(); }
 
 void ThumbnailBloomEffect::relayout()
 {
+    // Overview, Window View, Desktop Grid and the desktop slide all put the
+    // session up as it really is, so nothing of the effect's may be on the screen
+    // while one of them runs. There is no meeting them half way: they fly each
+    // window from the rectangle it really occupies (WindowHeapDelegate reads
+    // Window::frameGeometry through its QML properties), which a thumbnail never
+    // changes, and no effect can tell another where it is drawing. So the bloom
+    // gets out of the way instead.
+    if (effects->hasActiveFullScreenEffect()) {
+        standDown();
+        return;
+    }
+
     // Placing the click targets needs to know what covers them, so this comes
     // first.
     updateSystemRegion();
@@ -1433,6 +1449,34 @@ void ThumbnailBloomEffect::setHovered(EffectWindow *w, bool hovered)
     // it right away, under the very code that is still using it. The relayout
     // timer moves that to a safe point of the event loop instead.
     scheduleRelayout();
+}
+
+void ThumbnailBloomEffect::standDown()
+{
+    // At once rather than by animation. The effect that has just taken the
+    // screen begins its own animation from the real geometry on this very frame,
+    // and a thumbnail sliding home across it is a second motion going somewhere
+    // else; gone before the first frame, it is not seen at all.
+    //
+    // forget() is the ordinary end of a bloom, so this is the path a thumbnail
+    // takes whenever it stops being one, only without the trip: the ground it
+    // was painted over is repainted, its store is dropped, and its click target,
+    // its shield and its canvas go with its state.
+    //
+    // Collected first, because forget() erases from the container.
+    std::vector<EffectWindow *> bloomed;
+    bloomed.reserve(m_states.size());
+    for (const auto &[w, state] : m_states) {
+        bloomed.push_back(w);
+    }
+    for (EffectWindow *w : bloomed) {
+        forget(w);
+    }
+
+    // Run on the empty set, which is what hands every window its own input back:
+    // the filter is left claiming nothing, so a press reaches whatever the effect
+    // now on the screen put there.
+    updateShields();
 }
 
 void ThumbnailBloomEffect::forget(EffectWindow *w)
