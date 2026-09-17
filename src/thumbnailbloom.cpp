@@ -2064,7 +2064,17 @@ void ThumbnailBloomEffect::paintSnapshot(const RenderTarget &renderTarget,
     vbo->reset();
     vbo->setAttribLayout(std::span(GLVertexBuffer::GLVertex2DLayout), sizeof(GLVertex2D));
 
+    // Never snapped to the pixel grid, which is what a RenderGeometry does by
+    // itself and what OffscreenEffect::setVertexSnappingMode() exists to turn
+    // off. These vertices are in the window's own coordinates and the matrix
+    // below is what puts them on the screen, so rounding them lines nothing up
+    // with anything: it only drags each corner of the bend grid up to half a
+    // window pixel away from where the perspective put it, while its texture
+    // coordinate stays behind, and neighbouring cells round different ways.
+    // What the thumbnail must land on whole pixels is its rectangle, which
+    // retarget() has already rounded.
     RenderGeometry geometry;
+    geometry.setVertexSnappingMode(RenderGeometry::VertexSnappingMode::None);
     for (const WindowQuad &quad : quads) {
         geometry.appendWindowQuad(quad, scale);
     }
