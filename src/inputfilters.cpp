@@ -486,15 +486,21 @@ ShieldFilter::Hit ShieldFilter::hitAt(const QPointF &pos, const Window *stopAt) 
         if (window == stopAt) {
             aboveStop = false;
         }
+        // Asked first of all, the stop window excepted: these two are a flag and
+        // a hash lookup, where everything below is half a dozen calls into the
+        // window. They are also what turns the largest part of the stack away, an
+        // effect showing n thumbnails putting 3n internal windows of its own into
+        // it, all of them above the ordinary windows and so at the front of this
+        // walk. It runs on every pointer motion over a thumbnail.
+        if (window->isInternal() || m_bloomed.contains(window)) {
+            continue;
+        }
         if (window->isDeleted() || window->isMinimized() || window->isHidden()
             || window->isHiddenByShowDesktop()) {
             continue;
         }
         if (!window->isOnCurrentActivity() || !window->isOnCurrentDesktop()
             || !window->readyForPainting()) {
-            continue;
-        }
-        if (window->isInternal() || m_bloomed.contains(window)) {
             continue;
         }
         // A backdrop is the one window a thumbnail is painted over from below,

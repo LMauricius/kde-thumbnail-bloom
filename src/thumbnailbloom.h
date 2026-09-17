@@ -28,6 +28,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 class QWindow;
 
@@ -95,6 +96,17 @@ public:
      */
     bool blocksDirectScanout() const override;
     int requestedEffectChainPosition() const override;
+
+protected:
+    /*!
+     * Watches the application object for a colour scheme change, which in Qt 6
+     * is the only place one is announced.
+     *
+     * The two colours a frame is drawn between are read once and kept, a
+     * KColorScheme being far too much to build on every frame of every pass; this
+     * is what tells the effect the answer has moved on.
+     */
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     /*!
@@ -176,6 +188,12 @@ private:
         //! whole enlarged one once a click has landed on it, either way minus what covers it
         //! (a panel, a popup, or the enlarged rectangle of the thumbnail holding the pointer).
         QRegion hitRegion;
+        //! Centre of the window's real geometry the frame in the store was last bent towards.
+        QPointF bendOrigin;
+        //! Which reading of the outline colours the store was last painted with.
+        quint32 outlineSerial = 0;
+        //! Whether the channels have moved on since the store was last handed them.
+        bool canvasStale = true;
         KWin::TimeLine timeline;
         std::unique_ptr<ThumbnailOverlay> overlay; //!< the click target, which takes input and
             //!< draws nothing
@@ -581,8 +599,23 @@ private:
     ShieldFilter m_shieldFilter;
     TouchDragFilter m_touchDragFilter;
     DragDropFilter m_dragDropFilter;
-    QColor m_restOutline; //!< outline colour of a thumbnail at rest, read once per pass
+    QColor m_restOutline; //!< outline colour of a thumbnail at rest, read once per colour scheme
     QColor m_hoverOutline; //!< outline colour of a thumbnail under the pointer, ditto
+    bool m_outlineDirty = true; //!< whether the two have to be read again
+    //! Bumped whenever they are, so that a thumbnail at rest knows to repaint its frame once.
+    quint32 m_outlineSerial = 0;
+    /*!
+     * The windows the last layout found relevant, which is what the paint pass
+     * asks instead of working it out again.
+     *
+     * isRelevant() is some fifteen calls into the window, and the anchor walk
+     * puts the question to every window of the session on every frame it draws.
+     * The answer can only change with something that schedules a relayout, and
+     * the pass in between draws exactly the arrangement that layout settled, so
+     * the set is the right thing to read there. Nothing is ever dereferenced out
+     * of it, so a window closed since is simply one the set no longer names.
+     */
+    std::unordered_set<KWin::EffectWindow *> m_relevantWindows;
     QRegion m_moved; //!< logical ground the animations covered in this pass
     /*!
      * Per screen, the logical ground that has moved since that screen last

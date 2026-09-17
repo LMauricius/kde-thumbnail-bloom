@@ -87,7 +87,12 @@ struct ExtendedRegion
     {
         auto &oldBands = rectsScratchpad;
 
-        oldBands = m_bands;
+        // Swapped rather than copied: the bands are read once and thrown away,
+        // and a screen with a few dozen windows on it carries several hundred of
+        // them through a hundred subtractions. The scratchpad keeps the capacity
+        // of whichever vector it last held, so after the first pass neither side
+        // allocates again.
+        oldBands.swap(m_bands);
         m_bands.clear();
         for (auto &b : oldBands) {
             cutOut(b, mask, m_bands);
@@ -302,6 +307,18 @@ static std::optional<SizedSlot> searchSlot(const ExtendedRegion &free, const QRe
     // Shrink first, move second: try the starting size and only adjust it as needed to fit a spot
     const QSizeF initialSize = geometry.size() * startScale;
 
+    // The smallest thumbnail either placement is allowed to come back with.
+    // Both of them shrink the thumbnail to fit the band keeping its aspect
+    // ratio, so a band shorter than this on either axis can only ever answer
+    // with a scale below the minimum, which the test below the placement then
+    // throws away. Asked here instead, it is two comparisons rather than a
+    // placement worked out and discarded: cutting a work area up by a few dozen
+    // windows leaves several hundred bands, most of them slivers no thumbnail
+    // could ever sit in, and every one of them is offered to every thumbnail of
+    // every pass.
+    const qreal minWidth = geometry.width() * options.minScale;
+    const qreal minHeight = geometry.height() * options.minScale;
+
     // Search for the best spot according to the cost.
     // Whether we're using the 'packed' layout affects both the placement method and cost function
     // After placement we will ensure that at least the minimum shrinking is performed.
@@ -309,6 +326,10 @@ static std::optional<SizedSlot> searchSlot(const ExtendedRegion &free, const QRe
     std::optional<SizedSlot> bestSlot;
     qreal bestCost = std::numeric_limits<qreal>::max();
     for (const QRect &band : free) {
+        if (band.width() < minWidth || band.height() < minHeight) {
+            continue;
+        }
+
         const std::optional<std::pair<QRectF, qreal>> placement = packed
             ? packedPlacement(band, geometry, initialSize)
             : nearestPlacement(band, geometry, initialSize);

@@ -29,10 +29,12 @@
 
 #include <KColorScheme>
 
+#include <QGuiApplication>
 #include <QHash>
 #include <QSet>
 #include <QTransform>
 #include <QVector2D>
+#include <QtMath>
 
 #include <algorithm>
 #include <array>
@@ -57,14 +59,54 @@ namespace ThumbnailBloom {
 constexpr bool reducedMotion = true;
 
 /*!
- * How finely a bent thumbnail is cut up before its vertices are moved.
+ * The finest the grid a bent thumbnail is cut into may get, and how far the
+ * pixels it carries may stray from where the perspective puts them, in physical
+ * pixels.
  *
  * Texture coordinates are interpolated linearly inside a quad, so a quad drawn
- * as a trapezoid would still be textured as if it were a rectangle. Splitting
- * the window into a grid this size leaves each cell small enough for that error
- * to disappear, which is what makes the pixels perspective correct.
+ * as a trapezoid is still textured as if it were a rectangle: cutting the window
+ * up is what makes the pixels follow the perspective, each cell being small
+ * enough for the error inside it to disappear. How small that has to be is
+ * worked out per thumbnail by bendSubdivisions(), rather than a grid fine enough
+ * for the worst case being cut every time.
  */
-constexpr int bendSubdivisions = 16;
+constexpr int maxBendSubdivisions = 16;
+constexpr qreal bendTolerance = 0.25;
+
+/*!
+ * How many cells a side the thumbnail of \a drawn logical pixels has to be cut
+ * into to carry a bend of \a angle degrees without the pixels visibly sliding.
+ *
+ * Inside one cell the renderer walks the texture at a constant rate while the
+ * perspective walks it at a changing one, and the gap between the two is the
+ * error the grid exists to hide. It is a second-order one: the map along the
+ * bend is u/(1 + k u) with k = sin(angle)/2 for the way bendQuad() places the
+ * eye, so its curvature is 2k/(1 + k u)^3, and the most a straight line can
+ * stray from a curve over a step of 1/n of its length is that curvature times
+ * the step squared over eight. Turned round, the error falls as the square of
+ * the cell count, and asking for a quarter of a physical pixel of it settles n.
+ *
+ * Which is worth doing rather than cutting the finest grid every time: the grid
+ * is rebuilt, mapped vertex by vertex and streamed to the card on every frame of
+ * every thumbnail, and at the angle the effect actually ships with, a sixth of
+ * the cells carry the picture just as truly. A thumbnail that is not bent at all
+ * needs no grid whatsoever, and the caller skips the cut entirely.
+ */
+static int bendSubdivisions(qreal drawn, qreal angle, qreal scale)
+{
+    const qreal k = std::abs(std::sin(qDegreesToRadians(angle))) / 2.0;
+    if (k <= 0.0 || drawn <= 0.0) {
+        return 1;
+    }
+
+    // The curvature is largest at the near edge of the turn, where the
+    // denominator is smallest; u runs over half the side either way.
+    const qreal denominator = std::pow(std::max(0.25, 1.0 - k / 2.0), 3.0);
+    const qreal tolerance = bendTolerance / std::max(1.0, scale);
+    const int cells
+        = static_cast<int>(std::ceil(std::sqrt(drawn * k / (4.0 * denominator * tolerance))));
+    return std::clamp(cells, 1, maxBendSubdivisions);
+}
 
 /*! The frame geometry of \a w as a QRectF, the rectangle all the geometry here runs on. */
 static QRectF frameRect(const EffectWindow *w) { return QRectF(w->frameGeometry()); }
@@ -466,7 +508,6 @@ static QColor mixColors(const QColor &from, const QColor &to, qreal t)
 /*! Returns the colour a thumbnail under the pointer is outlined in. */
 static QColor hoverOutlineColor()
 {
-    // Read on every use: the colour scheme can change while the effect runs.
     return KColorScheme(QPalette::Active, KColorScheme::View)
         .decoration(KColorScheme::FocusColor)
         .color();
@@ -774,7 +815,24 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
         watch(w);
     }
 
+    // The colours the frame is drawn between are kept rather than read per
+    // frame, and this is the only announcement Qt 6 makes of a colour scheme
+    // change.
+    qApp->installEventFilter(this);
+
     reconfigure(ReconfigureAll);
+}
+
+bool ThumbnailBloomEffect::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
+        m_outlineDirty = true;
+        // Nothing else moves, so the frames of the thumbnails standing still
+        // would keep the old colour until something did.
+        effects->addRepaintFull();
+    }
+
+    return Effect::eventFilter(watched, event);
 }
 
 ThumbnailBloomEffect::~ThumbnailBloomEffect()
@@ -918,9 +976,14 @@ void ThumbnailBloomEffect::relayout()
     // judged, and walking the whole stack twice over to get that would ask it of
     // every window twice.
     std::vector<EffectWindow *> relevant;
+    m_relevantWindows.clear();
     for (EffectWindow *w : effects->stackingOrder()) {
         if (isRelevant(w)) {
             relevant.push_back(w);
+            // Kept for the paint pass, which needs the same answer for every
+            // window of the session on every frame and must not work it out
+            // fifteen calls at a time; see m_relevantWindows.
+            m_relevantWindows.insert(w);
         }
     }
 
@@ -1369,6 +1432,16 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     const auto targetable
         = [](const BloomState &state) { return state.overlay && state.overlay->isVisible(); };
 
+    // This runs on every step the pointer takes, for the whole life of the
+    // session, and with nothing bloomed there is no thumbnail for one to arrive
+    // at. The position is still kept: a thumbnail blooming under a cursor that
+    // has not moved has to read as one sat on rather than one arrived at, and
+    // that is the comparison which says so.
+    if (m_states.empty()) {
+        m_hoverPos = pos;
+        return;
+    }
+
     // Reduced motion: a thumbnail growing under the pointer while a window is
     // being dragged is motion nobody asked for, since the pointer is only
     // passing over it on its way somewhere else. Nothing is hovered until the
@@ -1723,7 +1796,12 @@ void ThumbnailBloomEffect::updateShields()
     // really is the topmost input target: everything above it has been added to
     // `covered` by the time the window is reached. Covering a window that lies
     // over a bloomed one would take away input that rightfully belongs to it.
-    QRegion covered = m_systemRegion;
+    // What the thumbnails claim goes in at the start rather than being added to
+    // every answer: the region is handed to one shield after another as the walk
+    // goes down, and building the union again for each of them is a walk of the
+    // whole screen's worth of rectangles per bloomed window. It is the only thing
+    // `covered` is ever asked for, so the two are the same region.
+    QRegion covered = m_systemRegion + thumbnails;
     QRegion shieldRegion;
     QSet<EffectWindow *> shielded;
     QSet<Window *> bloomedWindows;
@@ -1759,7 +1837,7 @@ void ThumbnailBloomEffect::updateShields()
             // stay out of the way under somebody else's shield.
             bloomedWindows.insert(w->window());
 
-            const QRegion exposed = placeShield(state, frame, covered + thumbnails);
+            const QRegion exposed = placeShield(state, frame, covered);
             if (!exposed.isEmpty()) {
                 shielded.insert(w);
                 shieldRegion += exposed;
@@ -2253,7 +2331,23 @@ void ThumbnailBloomEffect::apply(
     // them instead of across the window as a whole. Everything outside the frame
     // rides along on the same map, which keeps the shadow attached to the edge
     // it belongs to.
-    quads = quads.makeRegularGrid(bendSubdivisions, bendSubdivisions);
+    //
+    // How fine the grid has to be is asked of the thumbnail rather than fixed at
+    // the worst case. Every cell of it is built, mapped and streamed to the card
+    // on every frame the thumbnail is drawn, so a grid finer than the picture can
+    // show is paid for over and over; the error it is cut to hide falls as the
+    // square of the cell count, which is why the count needed at the angles the
+    // effect is used at is a fraction of the one the steepest setting wants. The
+    // measure is the rectangle the thumbnail is drawn at, since the grid is cut
+    // in the window's coordinates and everything in it is scaled down by exactly
+    // that ratio on its way to the screen.
+    const QRectF &drawn = bloomState.rect.current;
+    const int cells = bendSubdivisions(std::max(drawn.width(), drawn.height()),
+        m_bendAngle * bloomState.bend.current, deviceScale(window));
+    if (cells > 1) {
+        quads = quads.makeRegularGrid(cells, cells);
+    }
+
     for (WindowQuad &quad : quads) {
         for (int i = 0; i < 4; ++i) {
             WindowVertex &vertex = quad[i];
@@ -2290,12 +2384,20 @@ void ThumbnailBloomEffect::applyTransform(
 
 void ThumbnailBloomEffect::prePaintScreen(ScreenPrePaintData &data)
 {
-    // Read once for the whole pass rather than per thumbnail: building a
-    // KColorScheme means reading and computing a whole palette, and every frame
-    // of this pass is drawn between the same two colours. Before the animations
-    // advance, since that is where each frame is handed the colour it is at.
-    m_restOutline = restOutlineColor();
-    m_hoverOutline = hoverOutlineColor();
+    // Read when the colour scheme says so rather than per pass, let alone per
+    // thumbnail: building a KColorScheme means opening the scheme's config group
+    // and computing a whole palette out of it, which is some thirty microseconds
+    // of a frame that has sixteen thousand of them, and the answer changes only
+    // when the user changes the scheme. The palette change reaches the
+    // application object and nothing else in Qt 6, which is what the event filter
+    // is for. Refreshed before the animations advance, since that is where each
+    // frame is handed the colour it is at.
+    if (m_outlineDirty) {
+        m_outlineDirty = false;
+        m_restOutline = restOutlineColor();
+        m_hoverOutline = hoverOutlineColor();
+        m_outlineSerial++;
+    }
 
     const std::vector<EffectWindow *> settledBack = advanceAnimations(data);
     updateLift(data.screen);
@@ -2358,6 +2460,27 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         // thumbnail on it.
         const bool moving = !state.timeline.done();
 
+        // A thumbnail whose trip was over before this step is exactly where the
+        // last one left it, and so is everything drawn on it: every channel is
+        // sitting on its destination and the store holds the frame those values
+        // asked for. The whole step is therefore skipped rather than
+        // interpolated, bent and handed to the store again, which is two
+        // projective solves and a walk of four corners per thumbnail per pass and
+        // comes to the same answer every time. Two things can move under a
+        // thumbnail at rest without a trip being started: the colour scheme, and
+        // the window itself, which the frame leans towards. Both are asked here,
+        // and neither is the ordinary case.
+        //
+        // What the step would have added to the damage is nothing either: a
+        // finished timeline cannot move the thumbnail, which is what the pass
+        // below already says of it. The store has to have caught up first, since
+        // the pass of another screen can have taken the last step of the trip
+        // without repainting it.
+        if (!moving && !state.canvasStale && state.outlineSerial == m_outlineSerial
+            && frameRect(w).center() == state.bendOrigin) {
+            continue;
+        }
+
         state.timeline.advance(data.view);
         const qreal progress = state.timeline.value();
         state.rect.interpolate(progress);
@@ -2365,7 +2488,16 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         state.caption.interpolate(progress);
         state.bend.interpolate(progress);
         state.highlight.interpolate(progress);
-        refreshCanvas(w, state);
+        state.canvasStale = true;
+
+        // The store of a thumbnail on another screen is left to the pass of that
+        // screen, which runs this same walk and reaches it before anything draws
+        // it. Repainting it here as well would draw every frame of every caption
+        // and every frame twice over on a desk with two screens, and the second
+        // of the two would be thrown away unlooked at.
+        if (!data.screen || w->screen() == data.screen) {
+            refreshCanvas(w, state);
+        }
 
         state.painted = paintedArea(w, state);
 
@@ -2604,7 +2736,14 @@ void ThumbnailBloomEffect::updateLift(LogicalOutput *screen)
                 passedAbove.push_back(footprint(w));
                 m_liftedAbove.anchor = w;
                 aboveIndex = index;
-            } else if (isRelevant(w) && inPass(w)) {
+            } else if (passedBelow.empty() && passedAbove.empty()) {
+                // Nothing lifted has been passed yet, so nothing here can be
+                // covering one: the stack runs bottom to top. Worth saying
+                // outright, since everything below the lowest lifted thumbnail
+                // would otherwise be measured and classified for nothing, on
+                // every frame of every pass.
+                continue;
+            } else if (m_relevantWindows.contains(w) && inPass(w)) {
                 const QRect frame = footprint(w);
 
                 // The resting group stops short of the active window itself,
@@ -2851,10 +2990,11 @@ void ThumbnailBloomEffect::drawCanvas(const RenderTarget &renderTarget,
     // belongs whatever is in it, which at worst is the step before this one and
     // a scale of a few hundredths.
     WindowPaintData data;
+    bool corrected = false;
+    const QPointF origin = overlay->frameGeometry().topLeft();
     const QRectF rect = state.rect.current;
     const QRectF shown = state.canvas ? state.canvas->shownRect() : QRectF();
     if (!rect.isEmpty() && !shown.isEmpty()) {
-        const QPointF origin = overlay->frameGeometry().topLeft();
         const QRectF painted(origin + shown.topLeft(), shown.size());
         const auto near = [](qreal a, qreal b) { return std::abs(a - b) < outlineSlack; };
         if (!near(painted.x(), rect.x()) || !near(painted.y(), rect.y())
@@ -2867,10 +3007,35 @@ void ThumbnailBloomEffect::drawCanvas(const RenderTarget &renderTarget,
             data.setScale(QVector2D(scaleX, scaleY));
             data.setXTranslation(rect.x() - origin.x() - shown.x() * scaleX);
             data.setYTranslation(rect.y() - origin.y() - shown.y() * scaleY);
+            corrected = true;
         }
     }
-    effects->drawWindow(renderTarget, viewport, overlay,
-        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
+
+    // A store is the size of the thumbnail it belongs to and holds ink around
+    // the edge of it alone: the band of the frame and the strip of the caption,
+    // with the whole of the picture between them left untouched. Drawn as it
+    // stands it is nonetheless a quad the size of the thumbnail, which the scene
+    // blends pixel by pixel over the damage; that is the screen over again for
+    // every thumbnail on it, nine tenths of it spent on pixels that are empty.
+    // Clipping the draw to the ground the store was actually painted on hands
+    // all of that back. Only where the store is drawn where it was painted: the
+    // correction above moves the ink, and the region says where it was, not
+    // where it is going.
+    Region clip = deviceRegion;
+    if (!corrected && clip != Region::infinite()) {
+        const QRegion ink = state.canvas ? state.canvas->paintedRegion() : QRegion();
+        if (ink.isEmpty()) {
+            return;
+        }
+        clip &= viewport.mapToDeviceCoordinatesAligned(
+            Region(ink.translated(origin.toPoint())));
+        if (clip.isEmpty()) {
+            return;
+        }
+    }
+
+    effects->drawWindow(
+        renderTarget, viewport, overlay, PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, clip, data);
 }
 
 void ThumbnailBloomEffect::updateCanvas(EffectWindow *w, BloomState &state)
@@ -2929,6 +3094,15 @@ void ThumbnailBloomEffect::updateCanvas(EffectWindow *w, BloomState &state)
 
 void ThumbnailBloomEffect::refreshCanvas(EffectWindow *w, BloomState &state)
 {
+    // What the store now holds was made with these, which is what lets a
+    // thumbnail at rest be passed over entirely on the next frame; see
+    // advanceAnimations(). Noted before the store is asked for, so that a
+    // thumbnail that has none (a window held out of its bloom, whose frame came
+    // down with it) is passed over just the same.
+    state.outlineSerial = m_outlineSerial;
+    state.bendOrigin = frameRect(w).center();
+    state.canvasStale = false;
+
     if (!state.canvas) {
         return;
     }

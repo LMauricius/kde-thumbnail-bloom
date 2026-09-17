@@ -421,6 +421,50 @@ static QRect outlineBounds(const std::array<QPointF, 4> &corners, qreal width)
 }
 
 /*!
+ * Returns the part of the store a frame drawn \a width wide around \a corners
+ * really covers: the band around the picture, with the picture itself taken out
+ * of it.
+ *
+ * The whole of the frame lies outside the corners it is given, so no ink ever
+ * reaches the inside of the quad they describe and the largest rectangle that
+ * fits in there can be cut out. That hole is the point of measuring a region
+ * rather than the rectangle around the band: the rectangle around the band is
+ * the whole thumbnail, while the band itself is a line along the edge of it, and
+ * everything the store costs per frame is measured by the pixel.
+ *
+ * The rectangle is pulled in by a pixel on every side first, which is as far as
+ * the coverage ramp that antialiases the fill can reach past the edge it is
+ * drawn along, and then rounded inwards to whole pixels, so that a pixel the
+ * fill so much as laps onto is never taken for one it left alone.
+ */
+static QRegion outlineRegion(const std::array<QPointF, 4> &corners, qreal width)
+{
+    const QRect bounds = outlineBounds(corners, width);
+    if (bounds.isEmpty()) {
+        return QRegion();
+    }
+
+    // The corners run clockwise from the top left, so the rectangle inside the
+    // quad is bounded by the inner one of each opposing pair, whatever the bend
+    // has done to them.
+    const qreal left = std::max(corners[0].x(), corners[3].x()) + 1.0;
+    const qreal right = std::min(corners[1].x(), corners[2].x()) - 1.0;
+    const qreal top = std::max(corners[0].y(), corners[1].y()) + 1.0;
+    const qreal bottom = std::min(corners[2].y(), corners[3].y()) - 1.0;
+
+    // A pixel covers the half-open square from its own coordinate to the next
+    // one, so the last one that lies wholly inside ends a pixel short of the
+    // boundary; QRect takes both corners inclusively.
+    const QRect hole(QPoint(std::ceil(left), std::ceil(top)),
+        QPoint(std::floor(right) - 1, std::floor(bottom) - 1));
+    if (hole.isEmpty()) {
+        return QRegion(bounds);
+    }
+
+    return QRegion(bounds) - hole;
+}
+
+/*!
  * Returns the ring to fill for a frame \a width wide lying outside \a corners,
  * which run clockwise from the top left.
  *
@@ -490,7 +534,10 @@ ThumbnailCanvas::ThumbnailCanvas()
     // Hiding an internal window destroys it, and what comes back may be holding
     // a buffer of its own, so the first paint after a window has been away
     // clears the whole store rather than only the ground of what it drew last.
-    connect(this, &QWindow::visibleChanged, this, [this](bool) { m_paintedSize = QSize(); });
+    connect(this, &QWindow::visibleChanged, this, [this](bool) {
+        m_paintedSize = QSize();
+        m_painted = QRegion();
+    });
 
     // The rendered caption holds the colours of the scheme and the size of the
     // pixels it was made at, so both have to drop it.
@@ -534,19 +581,22 @@ QRectF ThumbnailCanvas::captionRect() const
         snapToDevice(anchor + m_captionBand.topLeft(), devicePixelRatio()), m_captionBand.size());
 }
 
-QRect ThumbnailCanvas::drawnBounds() const
+QRegion ThumbnailCanvas::paintedRegion() const { return m_painted; }
+
+QRegion ThumbnailCanvas::drawnBounds() const
 {
-    const QRect line = outlineBounds(m_corners, m_width);
+    QRegion drawn = outlineRegion(m_corners, m_width);
+
     // Clipped the way the paint clips it, so that what is cleared and what is
     // drawn are the same ground.
     const QRectF caption = captionRect().intersected(m_content);
-    if (caption.isEmpty()) {
-        return line;
+    if (!caption.isEmpty()) {
+        // Rounded outwards: a band lying between two pixels covers both of them,
+        // and the one it only laps onto still has to be cleared and drawn again.
+        drawn += caption.toAlignedRect();
     }
 
-    // Rounded outwards: a band lying between two pixels covers both of them, and
-    // the one it only laps onto still has to be cleared and drawn again.
-    return line.united(caption.toAlignedRect());
+    return drawn;
 }
 
 void ThumbnailCanvas::setContent(const QRectF &content, const std::array<QPointF, 4> &corners,
@@ -574,7 +624,7 @@ void ThumbnailCanvas::setContent(const QRectF &content, const std::array<QPointF
     // What the buffer holds at this moment. The repaint has to cover it as well
     // as the ground of the new drawing, the one being cleared and the other put
     // in its place.
-    const QRect stale = m_painted;
+    const QRegion stale = m_painted;
 
     m_content = content;
     m_corners = corners;
@@ -711,7 +761,7 @@ void ThumbnailCanvas::paintEvent(QPaintEvent *event)
         painter.fillRect(rect, Qt::transparent);
     }
 
-    m_painted = drawnBounds().intersected(whole);
+    m_painted = drawnBounds() & whole;
     m_paintedSize = size();
     // What the buffer holds from here on, which is what the effect measures its
     // draw against.

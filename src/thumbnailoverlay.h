@@ -151,6 +151,18 @@ public:
      */
     QRectF shownRect() const;
 
+    /*!
+     * Returns the part of the store the drawing now in it occupies, in window
+     * coordinates: the band the frame covers and the strip the caption sits on,
+     * never the picture between them, which the store never touches.
+     *
+     * It is what the effect clips the draw of the store to. A store is as large
+     * as the thumbnail it belongs to and holds ink around the edge of it alone,
+     * so blending the whole of it would cost the screen over again for every
+     * thumbnail on it.
+     */
+    QRegion paintedRegion() const;
+
 protected:
     void paintEvent(QPaintEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -172,8 +184,17 @@ private:
     void renderCaption();
     /*! Drops the rendered caption, so that the next paint makes it again. */
     void invalidateCaption();
-    /*! Everything a paint would put on the store as it stands, in window coordinates. */
-    QRect drawnBounds() const;
+    /*!
+     * Everything a paint would put on the store as it stands, in window
+     * coordinates: the band of the frame and the strip of the caption.
+     *
+     * A region rather than the rectangle around the two, because the rectangle
+     * around them is the whole thumbnail and the ink is a line along the edge of
+     * it. Everything the store costs per frame is measured from this: the pixels
+     * the paint clears, the pixels Qt uploads afterwards, and the pixels the
+     * scene blends when the effect draws the result.
+     */
+    QRegion drawnBounds() const;
 
     QRectF m_content; //!< part of the store the thumbnail covers, as last asked for
     QRectF m_shown; //!< the same, as the buffer now holds it
@@ -191,7 +212,7 @@ private:
     QRectF m_captionBand;
     bool m_captionDirty = true; //!< whether the image still matches the caption and the rest size
 
-    QRect m_painted; //!< what the last paint drew into, in window coordinates
+    QRegion m_painted; //!< what the last paint drew into, in window coordinates
     QSize m_paintedSize; //!< size of the store it drew into, a new one being a new buffer
 };
 
