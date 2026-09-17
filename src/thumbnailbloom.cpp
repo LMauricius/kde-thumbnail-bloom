@@ -1446,11 +1446,15 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // being dragged is motion nobody asked for, since the pointer is only
     // passing over it on its way somewhere else. Nothing is hovered until the
     // drag ends, and the pass the finish signal schedules picks the hover back
-    // up from wherever the pointer came to rest.
+    // up from wherever the pointer came to rest. Where the pointer went
+    // meanwhile is still followed, so that the thumbnails the dropped window
+    // rearranges are ones the cursor is sitting on rather than ones it has just
+    // arrived at, exactly as if they had bloomed under it.
     if (layoutFrozen()) {
         for (const auto &[w, state] : m_states) {
             setHovered(w, false);
         }
+        m_hoverPos = pos;
         return;
     }
 
@@ -1464,6 +1468,7 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
         for (const auto &[w, state] : m_states) {
             setHovered(w, w == owner);
         }
+        m_hoverPos = pos;
         return;
     }
 
@@ -1474,8 +1479,12 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // over. The release signal runs this again from wherever the pointer came to
     // rest. A drag and drop is the exception: it is carried with the button down
     // and it is going somewhere, so a thumbnail it comes to rest on lights up
-    // like any other drop target.
+    // like any other drop target. The pointer is followed all the same, so the
+    // release finds it where it left it and nothing has been arrived at: a
+    // thumbnail the button was dragged across, or came down on, is one the
+    // cursor is sitting on, and it grows when the cursor is next moved to it.
     if (pointerButtonHeld() && !dragInProgress()) {
+        m_hoverPos = pos;
         return;
     }
 
@@ -1484,19 +1493,24 @@ void ThumbnailBloomEffect::updateHover(const QPointF &pos)
     // puts a thumbnail there without the pointer moving at all, and a picture
     // that jumps out from under the cursor is the one thing nobody asked for. So
     // a hover only ever starts on a step that crosses into the thumbnail, which
-    // is what the step before says. A pointer that has not moved makes the two
-    // the same point and can start nothing; one that left the thumbnail and came
-    // back has the step before outside it, and the hover begins as it always
-    // did. A hover already running is never asked the question again: it was
-    // arrived at once and keeps the pointer for as long as it stays on.
+    // is what the step before says. That step is put the very same question this
+    // one is, rather than merely whether it lay in the hit region: the region is
+    // only half of what makes a thumbnail hoverable, the other half being
+    // whether a window covers it at that spot (the shadow of a client, which
+    // takes input for the resize border drawn inside it), and a pointer crossing
+    // out of the covered part onto the picture has arrived at it just as much as
+    // one crossing the edge of the region. Putting one question to both points
+    // is also what leaves a pointer that has not moved unable to start anything,
+    // whatever has gone on around it meanwhile; one that left the thumbnail and
+    // came back has the step before outside it and grows it as ever.
+    // A hover already running is never asked at all: it was arrived at once and
+    // keeps the pointer for as long as it stays on.
     // A drag is the exception, as it is to the held button above: it is going
     // somewhere, so it lights up what it rests on however that got there.
     EffectWindow *hovered = thumbnailUnder(pos);
-    if (hovered && !dragInProgress()) {
-        const BloomState &state = m_states.at(hovered);
-        if (!state.hovered && state.hitRegion.contains(m_hoverPos.toPoint())) {
-            hovered = nullptr;
-        }
+    if (hovered && !dragInProgress() && !m_states.at(hovered).hovered
+        && thumbnailUnder(m_hoverPos) == hovered) {
+        hovered = nullptr;
     }
     m_hoverPos = pos;
 
@@ -1518,12 +1532,16 @@ EffectWindow *ThumbnailBloomEffect::thumbnailUnder(const QPointF &pos) const
     // cut out of the region and hovering there does nothing.
     // At most one thumbnail is hovered, and the hovered one keeps it as long as
     // the pointer stays on it.
-    // A window painted over the thumbnail takes that part of it away, the hover
-    // included: the pointer is on the window, not on a thumbnail it cannot see.
+    // A window painted over the thumbnail takes that part of it away: the
+    // pointer is on the window, not on a thumbnail it cannot see, so no hover
+    // starts there. It ends none either. A thumbnail that is already hovered is
+    // drawn grown and lifted over that window, so the pixels under the pointer
+    // are its own after all, and dropping the hover on the way across a covered
+    // strip would have it shrink and grow again in the middle of itself.
     EffectWindow *hovered = nullptr;
     for (const auto &[w, state] : m_states) {
         if (state.overlay && state.overlay->isVisible() && state.hitRegion.contains(pos.toPoint())
-            && (state.clicked || !m_shieldFilter.isCovered(w->window(), pos))
+            && (state.clicked || state.hovered || !m_shieldFilter.isCovered(w->window(), pos))
             && (!hovered || state.hovered)) {
             hovered = w;
         }
