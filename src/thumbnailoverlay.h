@@ -13,6 +13,7 @@
 #include <QRasterWindow>
 #include <QRectF>
 #include <QRegion>
+#include <QSizeF>
 #include <QString>
 #include <QTimer>
 
@@ -32,6 +33,13 @@ namespace ThumbnailBloom {
  *
  * Used directly it is a shield: it makes the area a bloomed window vacated deaf
  * to hover and clicks. ThumbnailOverlay derives from it to also report clicks.
+ *
+ * Neither of those two is ever drawn. The effect leaves every surface of its own
+ * out of the pass (ThumbnailBloomEffect::paintWindow()) and draws back only the
+ * one that has something on it, which is ThumbnailCanvas; a window that paints
+ * nothing but a transparent buffer would otherwise still be blended over the
+ * damage on every frame. The buffer behind one of these is therefore allocated
+ * once, cleared once, and never looked at again.
  */
 class OverlayWindow : public QRasterWindow
 {
@@ -40,21 +48,6 @@ class OverlayWindow : public QRasterWindow
 public:
     OverlayWindow();
     ~OverlayWindow() override;
-
-    /*!
-     * Makes the window paint without taking any input, or stop doing so.
-     *
-     * KWin reads the "outputOnly" property of the QWindow in
-     * InternalWindow::hitTest(), which is the only way an internal window can
-     * stay on screen and yet be missed by the hit test; hiding it would take
-     * the painting with it. Subclasses also stop reporting gestures, so an
-     * event that reaches one anyway still means nothing.
-     */
-    void setOutputOnly(bool outputOnly);
-
-protected:
-    /*! Whether the window is painting only and must report no gesture. */
-    bool isOutputOnly() const;
 
 protected:
     bool event(QEvent *event) override;
@@ -66,28 +59,32 @@ protected:
 };
 
 /*!
- * The frame drawn around a thumbnail.
+ * Everything a thumbnail has drawn on it: the frame around the picture and the
+ * caption (the icon and the title) inside it.
  *
- * A window that paints rather than something the effect stamps on the screen,
- * for the same reason the caption is one: the compositor draws it once per
- * frame like any other surface, so it can neither be missed by a partial
- * repaint nor drawn where the thumbnail is not, and it needs no shader of its
- * own to be antialiased.
+ * A window rather than something the effect stamps on the screen, because a
+ * thumbnail can be painted twice in a pass (the lift) and can be missed by a
+ * partial repaint, both of which show on anything drawn over it by hand. The
+ * compositor draws this one once per frame like any other surface, and the
+ * antialiasing of the frame is QPainter's. It is the only surface of the effect
+ * that is drawn at all: the click target and the shield are input and nothing
+ * else, so putting the caption here is what keeps a thumbnail down to a single
+ * blended quad.
  *
- * The window is a store to paint frames into rather than the frame itself. The
- * effect keeps it at the largest rectangle the running animation will draw plus
- * the margin the line needs, moves it onto the thumbnail every frame and draws
- * it untransformed, and the line is painted around the part of it the thumbnail
+ * The window is a store to paint into rather than the drawing itself. The effect
+ * keeps it at the largest rectangle the running animation will draw plus the
+ * margin the line needs, moves it onto the thumbnail every frame and draws it
+ * untransformed, and the line is painted around the part of it the thumbnail
  * currently covers. Nothing is ever scaled that way, so the frame around a
- * thumbnail grown under the pointer is as sharp as the one around a thumbnail
- * at rest. The bend is painted rather than transformed for the same reason: the
- * corners handed to setOutline() are already the bent ones, at the size of this
+ * thumbnail grown under the pointer is as sharp as the one around a thumbnail at
+ * rest. The bend is painted rather than transformed for the same reason: the
+ * corners handed to setContent() are already the bent ones, at the size of this
  * very frame.
  *
  * The line lies outside the thumbnail rather than on it, so that it hides
  * nothing of the picture, and it is drawn over the thumbnail all the same: the
  * shadow of a window is painted with it and reaches further out than the frame
- * does. The corners handed to setOutline() are on the physical pixel grid and
+ * does. The corners handed to setContent() are on the physical pixel grid and
  * the width is a whole number of pixels, so the line comes out sharp; the
  * thumbnail underneath is bled half a pixel outwards to meet it, the picture
  * being the one of the two that can be stretched unnoticed.
@@ -96,21 +93,40 @@ protected:
  * itself: the picture keeps its corners, and the frame around them is the same
  * thickness at a corner as it is along an edge.
  *
+ * The caption rides the picture: it is laid out for the size the thumbnail rests
+ * at and put on the bottom of wherever the thumbnail is drawn at this moment, so
+ * a trip carries it along instead of leaving it at the destination. Laying it
+ * out against the travelling rectangle would mean drawing it again, shadows and
+ * all, on every frame of every trip. At rest the two rectangles are the same one.
+ *
  * It takes no input at all, the click target below it answering for the whole
  * thumbnail.
  */
-class OutlineOverlay : public OverlayWindow
+class ThumbnailCanvas : public OverlayWindow
 {
     Q_OBJECT
 
 public:
-    OutlineOverlay();
+    ThumbnailCanvas();
 
     /*!
-     * Sets the frame to draw around \a content, the part of the store the
-     * thumbnail covers: the four \a corners of the inside of the frame in window
-     * coordinates, clockwise from the top left, a band \a width logical pixels
-     * wide outside them, in \a color, at \a strength of its full opacity.
+     * Sets what the caption shows: \a icon beside \a title, either of which may
+     * be empty to leave that part out, laid out for a thumbnail of \a restSize.
+     *
+     * The size is the one the thumbnail comes to rest at rather than the one it
+     * is drawn at now, since the caption is laid out once and carried along a
+     * trip rather than laid out again for every size the picture passes through.
+     */
+    void setCaption(const QIcon &icon, const QString &title, const QSizeF &restSize);
+
+    /*!
+     * Sets everything this frame of the animation draws.
+     *
+     * \a content is the part of the store the thumbnail covers. The frame is a
+     * band \a width logical pixels wide lying outside the four \a corners, which
+     * are its inside in window coordinates, clockwise from the top left, drawn
+     * in \a color at \a strength of its full opacity; the caption is stamped at
+     * \a captionOpacity.
      *
      * The corners are the inside of the frame and not its middle, so the whole
      * of the band lies outside them. They are the picture's own corners, sharp,
@@ -122,12 +138,12 @@ public:
      * compositor is in the middle of drawing the very step of the animation this
      * frame belongs to.
      */
-    void setOutline(const QRectF &content, const std::array<QPointF, 4> &corners, qreal width,
-        const QColor &color, qreal strength);
+    void setContent(const QRectF &content, const std::array<QPointF, 4> &corners, qreal width,
+        const QColor &color, qreal strength, qreal captionOpacity);
 
     /*!
-     * Returns the rectangle the frame now in the store was painted around, in
-     * window coordinates, which is empty until one has been.
+     * Returns the rectangle the drawing now in the store was painted around, in
+     * window coordinates, which is empty until something has been.
      *
      * It is what the buffer actually holds rather than what was last asked for,
      * so the effect can tell whether the two have come apart and put the draw
@@ -137,14 +153,44 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    /*!
+     * Where in the store the rendered caption goes: hung from the bottom centre
+     * of the picture, snapped to the physical pixel grid so that stamping it
+     * resamples nothing. Empty when there is nothing to stamp.
+     */
+    QRectF captionRect() const;
+    /*!
+     * Draws the caption into m_captionImage, unless that one is still good.
+     *
+     * The two shadows are blurred on the processor, which is far too much work
+     * to repeat on every frame of a fade, let alone of a trip, so the result is
+     * kept and only stamped from then on.
+     */
+    void renderCaption();
+    /*! Drops the rendered caption, so that the next paint makes it again. */
+    void invalidateCaption();
+    /*! Everything a paint would put on the store as it stands, in window coordinates. */
+    QRect drawnBounds() const;
+
     QRectF m_content; //!< part of the store the thumbnail covers, as last asked for
     QRectF m_shown; //!< the same, as the buffer now holds it
+    QSizeF m_restSize; //!< size the thumbnail comes to rest at, which the caption is laid out for
     std::array<QPointF, 4> m_corners {};
     qreal m_width = 0.0;
     QColor m_color;
     qreal m_strength = 0.0;
+
+    QIcon m_icon;
+    QString m_title;
+    qreal m_captionOpacity = 0.0;
+    QImage m_captionImage; //!< the caption as drawn, in device pixels, or null for none
+    //! Where the image hangs from the bottom centre of the picture, the shadows included.
+    QRectF m_captionBand;
+    bool m_captionDirty = true; //!< whether the image still matches the caption and the rest size
+
     QRect m_painted; //!< what the last paint drew into, in window coordinates
     QSize m_paintedSize; //!< size of the store it drew into, a new one being a new buffer
 };
@@ -154,14 +200,9 @@ private:
  *
  * It covers the thumbnail's rectangle and turns the gestures it swallows into
  * the three things a thumbnail can do: activate its window, drag it out of the
- * thumbnail, or open its window menu. The frame around the thumbnail is a window
- * of its own (OutlineOverlay), since it has to follow the animation.
- *
- * It is also what carries the icon and the title of the window. Painting those
- * here rather than from the effect is what keeps them stable: the compositor
- * draws this window once per frame like any other, so the caption can neither
- * be missed by a partial repaint nor blended over itself when the thumbnail is
- * painted twice (which is what a lifted thumbnail is).
+ * thumbnail, or open its window menu. It draws nothing whatsoever: the picture
+ * is the effect's, and the frame and the caption over it belong to
+ * ThumbnailCanvas.
  *
  * A press never decides anything on its own; only what follows it does. The
  * pointer keeps its focus on this window for as long as a button is down
@@ -175,14 +216,6 @@ class ThumbnailOverlay : public OverlayWindow
 public:
     ThumbnailOverlay();
     ~ThumbnailOverlay() override;
-
-    /*!
-     * Sets what the caption shows: \a icon above \a title, either of which may
-     * be empty to leave that part out.
-     */
-    void setCaption(const QIcon &icon, const QString &title);
-    /*! Sets how opaque the caption is painted, from 0 (gone) to 1. */
-    void setCaptionOpacity(qreal opacity);
 
     /*!
      * Gives up the touch sequence being followed, so that nothing comes of it.
@@ -209,9 +242,6 @@ Q_SIGNALS:
 
 protected:
     bool event(QEvent *event) override;
-    bool eventFilter(QObject *watched, QEvent *event) override;
-    void paintEvent(QPaintEvent *event) override;
-    void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -221,24 +251,6 @@ private:
     static bool isDrag(const QPointF &origin, const QPointF &pos);
     /*! Ends the tracked touch sequence: no tap or long press can come of it any more. */
     void resetTouch();
-    /*!
-     * Draws the caption into m_captionImage, unless that one is still good.
-     *
-     * The two shadows are blurred on the processor, which is far too much work
-     * to repeat on every frame of a fade, so the result is kept and only
-     * stamped from then on.
-     */
-    void renderCaption();
-    /*! Drops the rendered caption and repaints, so that the next paint makes it again. */
-    void invalidateCaption();
-
-    QIcon m_icon;
-    QString m_title;
-    qreal m_captionOpacity = 0.0;
-
-    QImage m_captionImage; //!< the caption as drawn, in device pixels, or null for none
-    QRectF m_captionBand; //!< where in the window the image goes, the shadows included
-    bool m_captionDirty = true; //!< whether the image still matches the caption and the window
 
     QPointF m_pressOrigin; //!< where the left button went down
     bool m_pressed = false; //!< whether a left press is still undecided

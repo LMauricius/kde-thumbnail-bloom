@@ -16,7 +16,6 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPolygonF>
-#include <QResizeEvent>
 #include <QScreen>
 #include <QStyleHints>
 #include <QTouchEvent>
@@ -28,6 +27,19 @@
 #include <vector>
 
 namespace ThumbnailBloom {
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/*!
+ * Returns \a point moved onto the grid of whole physical pixels, there being
+ * \a dpr of them to a logical one.
+ */
+static QPointF snapToDevice(const QPointF &point, qreal dpr)
+{
+    return QPointF(std::round(point.x() * dpr) / dpr, std::round(point.y() * dpr) / dpr);
+}
 
 // ---------------------------------------------------------------------------
 // Caption
@@ -347,10 +359,6 @@ OverlayWindow::OverlayWindow()
 
 OverlayWindow::~OverlayWindow() = default;
 
-void OverlayWindow::setOutputOnly(bool outputOnly) { setProperty("outputOnly", outputOnly); }
-
-bool OverlayWindow::isOutputOnly() const { return property("outputOnly").toBool(); }
-
 bool OverlayWindow::event(QEvent *event)
 {
     // Touch has no per button handler to override, and an unhandled touch event
@@ -390,7 +398,7 @@ void OverlayWindow::mouseReleaseEvent(QMouseEvent *event) { event->accept(); }
 void OverlayWindow::wheelEvent(QWheelEvent *event) { event->accept(); }
 
 // ---------------------------------------------------------------------------
-// Outline
+// Canvas
 // ---------------------------------------------------------------------------
 
 /*!
@@ -469,30 +477,92 @@ static QPainterPath outlinePath(const std::array<QPointF, 4> &corners, qreal wid
     return path;
 }
 
-OutlineOverlay::OutlineOverlay()
+ThumbnailCanvas::ThumbnailCanvas()
 {
     // It paints and nothing else: the click target underneath answers for the
     // whole thumbnail, and two windows fighting over the same pixel would give
-    // the pointer nowhere to settle.
-    setOutputOnly(true);
+    // the pointer nowhere to settle. KWin reads this property in
+    // InternalWindow::hitTest(), which is the only way an internal window can
+    // stay on screen and yet be missed by the hit test; hiding it would take the
+    // painting with it.
+    setProperty("outputOnly", true);
 
     // Hiding an internal window destroys it, and what comes back may be holding
     // a buffer of its own, so the first paint after a window has been away
-    // clears the whole store rather than only the ground of the line it drew
-    // last.
+    // clears the whole store rather than only the ground of what it drew last.
     connect(this, &QWindow::visibleChanged, this, [this](bool) { m_paintedSize = QSize(); });
+
+    // The rendered caption holds the colours of the scheme and the size of the
+    // pixels it was made at, so both have to drop it.
+    connect(this, &QWindow::screenChanged, this, [this](QScreen *) { invalidateCaption(); });
+    qApp->installEventFilter(this);
 }
 
-QRectF OutlineOverlay::shownRect() const { return m_shown; }
+QRectF ThumbnailCanvas::shownRect() const { return m_shown; }
 
-void OutlineOverlay::setOutline(const QRectF &content, const std::array<QPointF, 4> &corners,
-    qreal width, const QColor &color, qreal strength)
+void ThumbnailCanvas::setCaption(const QIcon &icon, const QString &title, const QSizeF &restSize)
+{
+    if (m_title == title && m_icon.cacheKey() == icon.cacheKey() && restSize == m_restSize) {
+        return;
+    }
+
+    m_icon = icon;
+    m_title = title;
+    m_restSize = restSize;
+    invalidateCaption();
+}
+
+QRectF ThumbnailCanvas::captionRect() const
+{
+    if (m_captionImage.isNull() || m_captionOpacity <= 0.0 || m_content.isEmpty()) {
+        return QRectF();
+    }
+
+    // The caption hangs from the bottom centre of the picture wherever that is
+    // drawn at this moment, the band having been measured from the same point of
+    // the resting rectangle. So it is laid out once and rides the picture through
+    // a trip, rather than being laid out again for every size the picture passes
+    // through on the way; at rest the two rectangles are the same one, which is
+    // where the caption has to be exactly right.
+    //
+    // Snapping puts it back on the grid the image was made on. The band was
+    // squared up on the one of the device when it was rendered, and stamping it
+    // at a fraction of a device pixel would have QPainter resample it, which
+    // would leave the caption softer than it was drawn.
+    const QPointF anchor(m_content.center().x(), m_content.bottom());
+    return QRectF(
+        snapToDevice(anchor + m_captionBand.topLeft(), devicePixelRatio()), m_captionBand.size());
+}
+
+QRect ThumbnailCanvas::drawnBounds() const
+{
+    const QRect line = outlineBounds(m_corners, m_width);
+    // Clipped the way the paint clips it, so that what is cleared and what is
+    // drawn are the same ground.
+    const QRectF caption = captionRect().intersected(m_content);
+    if (caption.isEmpty()) {
+        return line;
+    }
+
+    // Rounded outwards: a band lying between two pixels covers both of them, and
+    // the one it only laps onto still has to be cleared and drawn again.
+    return line.united(caption.toAlignedRect());
+}
+
+void ThumbnailCanvas::setContent(const QRectF &content, const std::array<QPointF, 4> &corners,
+    qreal width, const QColor &color, qreal strength, qreal captionOpacity)
 {
     // A twentieth of a pixel either way is not worth a repaint and the upload
-    // that comes with it: every frame of a hover offers a slightly different
-    // line, and the difference between two of them is not visible.
+    // that comes with it, and neither is a step of alpha below one in 255: every
+    // frame of a hover offers a slightly different line and a slightly further
+    // fade, and the difference between two of them cannot be seen. A caption
+    // waiting to be drawn again always counts, since nothing else need have
+    // moved for the title or the colour scheme to have changed.
     const auto same = [](qreal a, qreal b) { return std::abs(a - b) < 0.05; };
-    bool changed = !same(width, m_width) || !same(strength, m_strength) || color != m_color;
+    bool changed = m_captionDirty || !same(width, m_width) || !same(strength, m_strength)
+        || color != m_color || std::abs(captionOpacity - m_captionOpacity) >= 1.0 / 255.0
+        || !same(content.x(), m_content.x()) || !same(content.y(), m_content.y())
+        || !same(content.width(), m_content.width()) || !same(content.height(), m_content.height());
     for (size_t i = 0; i < corners.size() && !changed; ++i) {
         changed
             = !same(corners[i].x(), m_corners[i].x()) || !same(corners[i].y(), m_corners[i].y());
@@ -501,64 +571,181 @@ void OutlineOverlay::setOutline(const QRectF &content, const std::array<QPointF,
         return;
     }
 
+    // What the buffer holds at this moment. The repaint has to cover it as well
+    // as the ground of the new drawing, the one being cleared and the other put
+    // in its place.
+    const QRect stale = m_painted;
+
     m_content = content;
     m_corners = corners;
     m_width = width;
     m_color = color;
     m_strength = strength;
+    m_captionOpacity = captionOpacity;
+
+    // Rendered here rather than in the paint, so that the band it lands on is
+    // known before the repaint is asked for and the repaint can be asked for
+    // over that band alone. A store is as large as the largest rectangle the
+    // running trip draws, which for a thumbnail on its way home is the whole
+    // window, and asking for all of it would have Qt upload all of it on every
+    // frame of the trip.
+    renderCaption();
+
+    update(stale.united(drawnBounds()));
 
     // Painted in this very turn rather than whenever the event loop gets round
-    // to it. The effect hands the frame over from inside the pass that is
-    // drawing this step of the animation, and it has already moved the store
-    // onto the thumbnail; a paint left to the update timer would put the line of
-    // the step before into the buffer the pass then draws, which is a frame of
-    // lag against a thumbnail in motion. Sending the request by hand is what
-    // Qt's own timer does when it goes off, so the paint and the flush that
-    // follows it are the ordinary ones and only the moment is ours. An
-    // unexposed window has nothing to paint into and is left to the timer.
-    update();
+    // to it. The effect hands this over from inside the pass that is drawing the
+    // step of the animation it belongs to, and it has already moved the store
+    // onto the thumbnail; a paint left to the update timer would put the step
+    // before into the buffer the pass then draws, which is a frame of lag against
+    // a thumbnail in motion. Sending the request by hand is what Qt's own timer
+    // does when it goes off, so the paint and the flush that follow it are the
+    // ordinary ones and only the moment is ours. An unexposed window has nothing
+    // to paint into and is left to the timer.
     if (isExposed()) {
         QEvent request(QEvent::UpdateRequest);
         QCoreApplication::sendEvent(this, &request);
     }
 }
 
-void OutlineOverlay::paintEvent(QPaintEvent *event)
+void ThumbnailCanvas::invalidateCaption()
 {
-    Q_UNUSED(event)
+    m_captionDirty = true;
+
+    // The band the old caption occupied has to be cleared even when the new one
+    // turns out smaller or lands elsewhere, so this one asks for the whole store.
+    // It is the rare path: a title, a colour scheme or a screen changing, and the
+    // resting size of the thumbnail. Every frame of a fade or of a trip goes
+    // through setContent(), which pays band by band.
+    if (m_captionOpacity > 0.0) {
+        update();
+    }
+}
+
+void ThumbnailCanvas::renderCaption()
+{
+    if (!m_captionDirty) {
+        return;
+    }
+
+    m_captionDirty = false;
+    m_captionImage = QImage();
+    m_captionBand = QRectF();
+
+    if ((m_icon.isNull() && m_title.isEmpty()) || m_restSize.isEmpty()) {
+        return;
+    }
+
+    const qreal dpr = devicePixelRatio();
+    // Laid out against a rectangle at the origin rather than against the window:
+    // the area the caption sits in travels with the thumbnail, and keeping the
+    // band relative to it is what lets the image outlive the trip.
+    const CaptionLayout layout
+        = captionLayout(QRectF(QPointF(0, 0), m_restSize), m_icon, m_title, dpr);
+    if (layout.band.isEmpty()) {
+        return;
+    }
+
+    // Blurring the two shadows by hand costs far too much to repeat on every
+    // frame of a fade, let alone of a trip, so the caption is drawn once into an
+    // image of its own and only stamped from there on. The image covers the whole
+    // band, the shadows included; the fade is then a matter of the opacity it is
+    // stamped with.
+    //
+    // The band is squared up on the grid of the device rather than on the one of
+    // the logical pixels: on a screen scaled by anything but a whole number the
+    // two do not line up, and an image sized to a fraction of a device pixel
+    // would be resampled wherever it was put. captionRect() lands it back on that
+    // same grid.
+    const QRect device
+        = QRectF(layout.band.topLeft() * dpr, layout.band.size() * dpr).toAlignedRect();
+    const QRectF band(QPointF(device.x() / dpr, device.y() / dpr),
+        QSizeF(device.width() / dpr, device.height() / dpr));
+
+    m_captionImage = QImage(device.size(), QImage::Format_ARGB32_Premultiplied);
+    m_captionImage.setDevicePixelRatio(dpr);
+    m_captionImage.fill(Qt::transparent);
+
+    QPainter painter(&m_captionImage);
+    painter.setRenderHints(
+        QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
+    painter.translate(-band.topLeft());
+    paintCaption(painter, layout, m_icon, dpr);
+
+    // Kept as an offset from the bottom centre of the rectangle it was laid out
+    // for, which is the point captionRect() hangs it from on the picture. So the
+    // image outlives every trip: only the anchor moves.
+    m_captionBand = band.translated(-QPointF(m_restSize.width() / 2, m_restSize.height()));
+}
+
+bool ThumbnailCanvas::eventFilter(QObject *watched, QEvent *event)
+{
+    // In Qt 6 the palette change reaches the application object and nothing
+    // else, so that is where a colour scheme change has to be picked up from.
+    if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
+        invalidateCaption();
+    }
+
+    return OverlayWindow::eventFilter(watched, event);
+}
+
+void ThumbnailCanvas::paintEvent(QPaintEvent *event)
+{
+    renderCaption();
 
     QPainter painter(this);
 
-    // Source mode clears instead of blending: the store keeps the line where it
-    // was last drawn, and blending the new one over it would leave both. What is
-    // cleared is the ground of that line together with the ground of this one,
-    // rather than the whole store: the store is as large as the largest
-    // rectangle the running animation draws, which for a thumbnail on its way
-    // home is the whole window, and clearing all of that every frame would cost
-    // more than the line does. A store that has just been resized is the one
-    // exception, being a new buffer: what is in a part of one that nothing has
-    // painted is whatever was in that memory.
+    // Source mode clears instead of blending: the store keeps what was drawn last
+    // time, and blending the new line and the new caption over the old ones would
+    // leave both of each. Only what the repaint asked for is cleared, which
+    // setContent() sized to the ground of the old drawing and of the new one
+    // together; clearing the whole store every frame would cost more than the
+    // drawing does, a store being as large as the whole window while a thumbnail
+    // travels home. A store that has just been resized is the one exception,
+    // being a new buffer: what is in a part of one that nothing has painted is
+    // whatever was in that memory.
     const QRect whole(QPoint(0, 0), size());
-    const QRect line = outlineBounds(m_corners, m_width);
-    const QRect stale = m_paintedSize == size() ? m_painted.united(line) : whole;
+    const QRegion stale = m_paintedSize == size() ? event->region() : QRegion(whole);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
-    painter.fillRect(stale.intersected(whole), Qt::transparent);
-    m_painted = line.intersected(whole);
+    for (const QRect &rect : stale) {
+        painter.fillRect(rect, Qt::transparent);
+    }
+
+    m_painted = drawnBounds().intersected(whole);
     m_paintedSize = size();
     // What the buffer holds from here on, which is what the effect measures its
     // draw against.
     m_shown = m_content;
 
-    if (m_width <= 0.0 || m_strength <= 0.0 || !m_color.isValid()) {
-        return;
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    painter.setClipRegion(stale);
+
+    // The frame first and the caption over it, the icon and the title being what
+    // a corner of the frame gives way to.
+    if (m_width > 0.0 && m_strength > 0.0 && m_color.isValid()) {
+        QColor color = m_color;
+        color.setAlphaF(std::clamp<qreal>(color.alphaF() * m_strength, 0.0, 1.0));
+
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillPath(outlinePath(m_corners, m_width), color);
     }
 
-    QColor color = m_color;
-    color.setAlphaF(std::clamp<qreal>(color.alphaF() * m_strength, 0.0, 1.0));
+    const QRectF caption = captionRect();
+    if (!caption.isEmpty()) {
+        // Kept inside the picture it belongs to. The caption is laid out for the
+        // size the thumbnail rests at, so a thumbnail passing through a smaller
+        // size on its way up to that one is narrower than its own caption, and
+        // the part that does not fit would be drawn beside the picture, out of
+        // the ground the effect repaints for it. Clipped instead, it is hidden
+        // for the moment the trip lasts and whole again the moment the thumbnail
+        // arrives, which is where it has to be right.
+        painter.setClipRect(m_content, Qt::IntersectClip);
 
-    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.fillPath(outlinePath(m_corners, m_width), color);
+        // All that is left of the caption drawing: it was rendered once, shadows
+        // and all, and the fade is the opacity it is stamped at.
+        painter.setOpacity(std::min(m_captionOpacity, 1.0));
+        painter.drawImage(caption.topLeft(), m_captionImage);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -573,162 +760,16 @@ ThumbnailOverlay::ThumbnailOverlay()
     m_longPressTimer.setSingleShot(true);
     m_longPressTimer.setInterval(QGuiApplication::styleHints()->mousePressAndHoldInterval());
     connect(&m_longPressTimer, &QTimer::timeout, this, [this]() {
-        if (m_touchArmed && !isOutputOnly()) {
+        if (m_touchArmed) {
             m_touchArmed = false;
             Q_EMIT menuRequested(m_touchOrigin);
         }
     });
-
-    // The rendered caption holds the colours of the scheme and the size of the
-    // pixels it was made at, so both have to drop it.
-    connect(this, &QWindow::screenChanged, this, [this](QScreen *) { invalidateCaption(); });
-    qApp->installEventFilter(this);
 }
 
 ThumbnailOverlay::~ThumbnailOverlay() = default;
 
-void ThumbnailOverlay::setCaption(const QIcon &icon, const QString &title)
-{
-    if (m_title == title && m_icon.cacheKey() == icon.cacheKey()) {
-        return;
-    }
-
-    m_icon = icon;
-    m_title = title;
-    invalidateCaption();
-}
-
-void ThumbnailOverlay::setCaptionOpacity(qreal opacity)
-{
-    // Repainted only when the change can be seen: the fade runs on the
-    // compositor's clock and would otherwise queue a repaint every frame for
-    // steps far below one step of alpha.
-    if (std::abs(opacity - m_captionOpacity) < 1.0 / 255.0) {
-        return;
-    }
-
-    m_captionOpacity = opacity;
-
-    // Only the strip the caption is drawn in has to be repainted, which is what
-    // keeps a fade from redrawing and re-uploading the whole thumbnail sized
-    // window every frame. A caption that has not been laid out yet may land
-    // anywhere, so that one still takes the window as a whole; one that will
-    // draw nothing at all needs no repaint whatsoever.
-    if (m_captionDirty) {
-        if (!m_icon.isNull() || !m_title.isEmpty()) {
-            update();
-        }
-    } else if (!m_captionBand.isEmpty()) {
-        update(m_captionBand.toAlignedRect());
-    }
-}
-
 void ThumbnailOverlay::cancelTouch() { resetTouch(); }
-
-void ThumbnailOverlay::invalidateCaption()
-{
-    m_captionDirty = true;
-
-    // The band the old caption occupied has to be cleared even when the new one
-    // turns out to be smaller, so this repaints everything.
-    if (m_captionOpacity > 0) {
-        update();
-    }
-}
-
-void ThumbnailOverlay::renderCaption()
-{
-    if (!m_captionDirty) {
-        return;
-    }
-
-    m_captionDirty = false;
-    m_captionImage = QImage();
-    m_captionBand = QRectF();
-
-    if (m_icon.isNull() && m_title.isEmpty()) {
-        return;
-    }
-
-    const qreal dpr = devicePixelRatio();
-    const CaptionLayout layout = captionLayout(QRectF(QPointF(0, 0), size()), m_icon, m_title, dpr);
-    if (layout.band.isEmpty()) {
-        return;
-    }
-
-    // Blurring the two shadows by hand costs far too much to repeat on every
-    // frame of a fade, so the caption is drawn once into an image of its own and
-    // only stamped from there on. The image covers the whole band, the shadows
-    // included; the fade is then a matter of the opacity it is stamped with.
-    //
-    // The band is squared up on the grid of the device rather than on the one of
-    // the logical pixels, and the image is placed back on it by that same grid:
-    // on a screen scaled by anything but a whole number the two do not line up,
-    // and stamping the image at a fraction of a device pixel would have QPainter
-    // resample it, which would leave the caption softer than it was drawn.
-    const QRect device
-        = QRectF(layout.band.topLeft() * dpr, layout.band.size() * dpr).toAlignedRect();
-    m_captionBand = QRectF(QPointF(device.x() / dpr, device.y() / dpr),
-        QSizeF(device.width() / dpr, device.height() / dpr));
-
-    m_captionImage = QImage(device.size(), QImage::Format_ARGB32_Premultiplied);
-    m_captionImage.setDevicePixelRatio(dpr);
-    m_captionImage.fill(Qt::transparent);
-
-    QPainter painter(&m_captionImage);
-    painter.setRenderHints(
-        QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
-    painter.translate(-m_captionBand.topLeft());
-    paintCaption(painter, layout, m_icon, dpr);
-}
-
-void ThumbnailOverlay::resizeEvent(QResizeEvent *event)
-{
-    // The caption is laid out against the size of the window, and a resize
-    // repaints the whole of it anyway.
-    invalidateCaption();
-    OverlayWindow::resizeEvent(event);
-}
-
-bool ThumbnailOverlay::eventFilter(QObject *watched, QEvent *event)
-{
-    // In Qt 6 the palette change reaches the application object and nothing
-    // else, so that is where a colour scheme change has to be picked up from.
-    if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
-        invalidateCaption();
-    }
-
-    return OverlayWindow::eventFilter(watched, event);
-}
-
-void ThumbnailOverlay::paintEvent(QPaintEvent *event)
-{
-    renderCaption();
-
-    // Source mode clears instead of blending: the backing store keeps what was
-    // drawn last time, and blending the new caption over the old one would
-    // double it. Only what the repaint asked for is cleared, which is what lets
-    // a fade repaint the caption band alone; nothing is ever drawn outside that
-    // band, so the rest of the window still holds the pixels a full paint
-    // cleared, and invalidateCaption() repaints everything whenever the band
-    // itself can have moved.
-    QPainter painter(this);
-    painter.setCompositionMode(QPainter::CompositionMode_Source);
-    for (const QRect &rect : event->region()) {
-        painter.fillRect(rect, Qt::transparent);
-    }
-
-    if (m_captionOpacity <= 0 || m_captionImage.isNull()) {
-        return;
-    }
-
-    // All that is left of the drawing: the caption was rendered once, shadows
-    // and all, and the fade is the opacity it is stamped at.
-    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    painter.setClipRegion(event->region());
-    painter.setOpacity(std::min(m_captionOpacity, 1.0));
-    painter.drawImage(m_captionBand.topLeft(), m_captionImage);
-}
 
 bool ThumbnailOverlay::isDrag(const QPointF &origin, const QPointF &pos)
 {
@@ -748,7 +789,7 @@ bool ThumbnailOverlay::event(QEvent *event)
     switch (event->type()) {
     case QEvent::TouchBegin: {
         const QList<QEventPoint> &points = static_cast<QTouchEvent *>(event)->points();
-        if (!m_touchArmed && !points.isEmpty() && !isOutputOnly()) {
+        if (!m_touchArmed && !points.isEmpty()) {
             m_touchId = points.first().id();
             m_touchOrigin = points.first().globalPosition();
             m_touchArmed = true;
@@ -794,10 +835,6 @@ bool ThumbnailOverlay::event(QEvent *event)
 void ThumbnailOverlay::mousePressEvent(QMouseEvent *event)
 {
     event->accept();
-
-    if (isOutputOnly()) {
-        return;
-    }
 
     // The left button decides nothing yet: what happens next (a release or a
     // move) is what tells an activation from a drag apart.

@@ -28,13 +28,12 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
-#include <unordered_set>
 
 class QWindow;
 
 namespace ThumbnailBloom {
 
-class OutlineOverlay;
+class ThumbnailCanvas;
 class OverlayWindow;
 class ThumbnailOverlay;
 
@@ -43,7 +42,10 @@ class ThumbnailOverlay;
  *
  * Windows are never really moved or resized: they are painted scaled down and
  * translated, and a transparent click target (ThumbnailOverlay) is put on top
- * of each finished thumbnail so that it can be clicked into focus.
+ * of each finished thumbnail so that it can be clicked into focus. The frame
+ * around a thumbnail and the caption on it are painted by one window of their
+ * own (ThumbnailCanvas), which is the only surface of the effect that is ever
+ * drawn.
  *
  * Every bloomed window is drawn through a store of its own (drawWindow()): a
  * texture holding the window at its real size, with a mip chain over it. That
@@ -144,7 +146,7 @@ private:
         Animated<QRectF> rect; //!< rectangle the thumbnail is painted in
         QRectF painted; //!< screen area the last frame drew the thumbnail into
         Animated<qreal> opacity; //!< thumbnail opacity, 1.0 when hovered or at home
-        Animated<qreal> caption; //!< caption opacity the click target paints with
+        Animated<qreal> caption; //!< caption opacity the store paints with
         Animated<qreal> bend; //!< bend strength, 0 flat, 1 full angle
         //! How far the outline is towards its hover weight, 1 while the pointer is on the thumbnail.
         Animated<qreal> highlight;
@@ -175,12 +177,13 @@ private:
         //! (a panel, a popup, or the enlarged rectangle of the thumbnail holding the pointer).
         QRegion hitRegion;
         KWin::TimeLine timeline;
-        std::unique_ptr<ThumbnailOverlay> overlay;
+        std::unique_ptr<ThumbnailOverlay> overlay; //!< the click target, which takes input and
+            //!< draws nothing
+        //! Store the frame and the caption of the thumbnail are painted in, and the one surface
+        //! of the effect's own that is drawn at all.
+        std::unique_ptr<ThumbnailCanvas> canvas;
         QPointer<KWin::EffectWindow>
-            overlayWindow; //!< the click target as the scene knows it, while it is shown
-        std::unique_ptr<OutlineOverlay> outline; //!< store the frame around the thumbnail is painted in
-        QPointer<KWin::EffectWindow>
-            outlineWindow; //!< that frame as the scene knows it, while it is shown
+            canvasWindow; //!< that store as the scene knows it, while it is shown
         std::unique_ptr<OverlayWindow>
             shield; //!< swallows the input the vacated real geometry would still get
     };
@@ -327,16 +330,15 @@ private:
      * shader, the same uniforms, the same blending and the same clipping, with
      * the store standing in for the window's own texture.
      */
-    void paintSnapshot(const KWin::RenderTarget &renderTarget,
-        const KWin::RenderViewport &viewport, KWin::EffectWindow *w, BloomState &state,
-        const KWin::Region &deviceRegion, const KWin::WindowPaintData &data,
-        const KWin::WindowQuadList &quads);
+    void paintSnapshot(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+        KWin::EffectWindow *w, BloomState &state, const KWin::Region &deviceRegion,
+        const KWin::WindowPaintData &data, const KWin::WindowQuadList &quads);
     /*!
      * The bend of \a state applied over \a rect: the configured angle scaled by
      * the animated strength, leaning towards the window's real place. \a rect is
      * the frame at the origin for the pixels (apply()) and the rectangle the
      * thumbnail is drawn on, in the coordinates of the frame store, for the
-     * outline (refreshOutline()); the direction is taken from the on-screen
+     * outline (refreshCanvas()); the direction is taken from the on-screen
      * rectangle either way, so the two cannot drift apart.
      */
     QTransform stateBend(KWin::EffectWindow *w, const BloomState &state, const QRectF &rect) const;
@@ -361,8 +363,8 @@ private:
     void applyTransform(
         KWin::EffectWindow *w, const BloomState &state, KWin::WindowPaintData &data) const;
     /*!
-     * Advances every timeline one frame, interpolates the four channels, and
-     * pushes the caption opacity into the click targets. Fills m_moved and the
+     * Advances every timeline one frame, interpolates the channels and repaints
+     * the store of every thumbnail with them. Fills m_moved and the
      * pending region of every screen with the ground the step covered, and
      * returns the windows whose thumbnails have arrived back at their real
      * geometry, for the caller to forget.
@@ -389,30 +391,41 @@ private:
     void drawLifted(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         LiftGroup &group, const KWin::Region &deviceRegion);
     /*!
-     * Draws the frame of \a state, which is a window of its own
-     * (OutlineOverlay) rather than anything the effect stamps on the screen.
+     * Draws the store of \a state: the frame around the thumbnail and the
+     * caption on it, in a window of its own (ThumbnailCanvas) rather than
+     * anything the effect stamps on the screen.
      *
-     * refreshOutline() has already put the frame store on the thumbnail and
-     * painted the line into it at the size of this very frame, so all this
-     * normally does is draw the window where it is, right after the thumbnail and
-     * under the caption. Over the thumbnail although the line lies outside it:
-     * the shadow of a window is painted with the thumbnail and reaches past the
-     * rectangle the frame goes on, so a line drawn underneath would be tinted by
-     * it. Should the store hold an older
-     * frame after all, it is scaled from the rectangle it was painted around
-     * onto the one the thumbnail is drawn at, so the line cannot lag behind the
-     * picture whatever became of the paint. \a deviceRegion is the clip, the
-     * region the thumbnail itself is painted with.
+     * Called right after the thumbnail itself, which is what gives both of them
+     * the depth of that thumbnail rather than the top of the screen, where the
+     * layer of an internal window would otherwise keep them: from there the
+     * compositor covers the picture, the frame and the caption together, and
+     * nothing has to be worked out from geometry. Over the thumbnail although
+     * the line lies outside it: the shadow of a window is painted with the
+     * thumbnail and reaches past the rectangle the frame goes on, so a line
+     * drawn underneath would be tinted by it.
+     *
+     * refreshCanvas() has already put the store on the thumbnail and painted
+     * into it at the size of this very frame, so all this normally does is draw
+     * the window where it is. Should the store hold an older frame after all, it
+     * is scaled from the rectangle it was painted around onto the one the
+     * thumbnail is drawn at, so the drawing cannot lag behind the picture
+     * whatever became of the paint. \a deviceRegion is the clip, the region the
+     * thumbnail itself is painted with.
      */
-    void drawOutline(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
+    void drawCanvas(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
         BloomState &state, const KWin::Region &deviceRegion);
-    /*! Puts the click target of \a w on its resting rectangle, or hides it. */
-    void updateOverlay(KWin::EffectWindow *w, BloomState &state);
-    /*! Puts the frame store of \a w up, or takes it down. */
-    void updateOutline(KWin::EffectWindow *w, BloomState &state);
     /*!
-     * Places the frame store of \a w and hands it this frame's corners, width,
-     * colour and strength.
+     * Puts the click target of \a w on its resting rectangle, or hides it.
+     *
+     * Input and nothing else: it is left out of every paint pass, and what is
+     * drawn on a thumbnail belongs to its store (updateCanvas()).
+     */
+    void updateOverlay(KWin::EffectWindow *w, BloomState &state);
+    /*! Puts the store of \a w up with its caption, or takes it down. */
+    void updateCanvas(KWin::EffectWindow *w, BloomState &state);
+    /*!
+     * Places the store of \a w and hands it this frame's corners, width, colour
+     * and strength, along with how opaque the caption on it is.
      *
      * Every thumbnail is framed and the state's highlight channel decides only
      * how heavily: a thin caption-coloured line at rest, thickening and turning
@@ -430,20 +443,13 @@ private:
      * picture is covered by thumbnailBleed. The corners handed over are the
      * inside of the frame, which the store fills outwards from and rounds on its
      * outer corners alone.
-     */
-    void refreshOutline(KWin::EffectWindow *w, BloomState &state);
-    /*!
-     * Draws the caption of \a w, which is to say its click target, if it has one.
      *
-     * Called right after the frame of \a w has been drawn, and so over both it
-     * and the picture, which is what
-     * puts the caption at the depth of the thumbnail rather than at the top of
-     * the screen, where the layer of an internal window would otherwise keep it.
-     *
-     * \a deviceRegion is the clip of the draw, as in drawOutline().
+     * The caption goes with the rectangle the thumbnail is drawn at and the size
+     * it rests at: the store lays it out for the resting size and carries it
+     * along a trip rather than leaving it at the destination, which is what
+     * keeps it from having to be drawn again, shadows and all, on every frame.
      */
-    void drawCaption(const KWin::RenderTarget &renderTarget, const KWin::RenderViewport &viewport,
-        KWin::EffectWindow *w, const KWin::Region &deviceRegion);
+    void refreshCanvas(KWin::EffectWindow *w, BloomState &state);
     /*! Puts a shield on the part of every bloomed window that would still take input. */
     void updateShields();
     /*!
@@ -503,17 +509,18 @@ private:
      */
     void updateBackdropScreens(
         const std::vector<KWin::EffectWindow *> &relevant, const std::vector<bool> &ignored);
-    /*! Whether \a w is one of the effect's own surfaces: a click target, a frame or a shield. */
-    bool isOwnOverlay(KWin::EffectWindow *w) const;
     /*!
-     * Whether \a w is one of the surfaces the effect draws itself, which is to
-     * say a click target or a frame.
+     * Whether \a w is one of the effect's own surfaces: a store, a click target
+     * or a shield.
      *
-     * Those are left out of the pass at their own place in the stacking order,
-     * where the layer of an internal window would put them over everything, and
-     * drawn again right after the thumbnail they belong to.
+     * Every one of them is left out of the pass at its own place in the stacking
+     * order, where the layer of an internal window would put it over everything.
+     * The stores are drawn again right after the thumbnail each one belongs to;
+     * the other two are never drawn at all, taking input and nothing else, and
+     * painting a transparent buffer over the damage of every frame is exactly
+     * what they are spared that way.
      */
-    bool isDrawnOverlay(KWin::EffectWindow *w) const;
+    bool isOwnOverlay(KWin::EffectWindow *w) const;
     /*! Recomputes the area the system elements take away from the thumbnails. */
     void updateSystemRegion();
 
@@ -523,10 +530,6 @@ private:
     void watch(KWin::EffectWindow *w);
 
     std::unordered_map<KWin::EffectWindow *, BloomState> m_states;
-    //! Every surface of the effect's own: the click targets, the frames and the shields.
-    std::unordered_set<const QWindow *> m_ownOverlays;
-    //! The ones the effect draws itself, out of the stacking order: click targets and frames.
-    std::unordered_set<const QWindow *> m_drawnOverlays;
     QTimer m_relayoutTimer;
     std::chrono::milliseconds m_animationDuration { 250 };
     bool m_showIcons = true;

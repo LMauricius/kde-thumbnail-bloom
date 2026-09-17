@@ -429,7 +429,7 @@ constexpr qreal outlineEpsilon = 1e-2;
  * How far the frame in the store may be off the thumbnail before the draw puts
  * it right, in logical pixels.
  *
- * The same twentieth of a pixel OutlineOverlay::setOutline() calls a change
+ * The same twentieth of a pixel ThumbnailCanvas::setContent() calls a change
  * worth repainting, and it has to be: a difference it drops is one no transform
  * should be spent on either, since the store then holds the frame this one asked
  * for and correcting it would resample the line for nothing.
@@ -1219,11 +1219,11 @@ void ThumbnailBloomEffect::retarget(
 
     // The click target follows the resting rectangle, not the animation: a
     // thumbnail can be hovered and clicked from the moment it sets off, but only
-    // where it is going to end up. The frame store is put up here as well, for a
-    // reason of its own: both are windows, and a window may only be shown or
-    // hidden from a relayout.
+    // where it is going to end up. The store is put up here as well, for a reason
+    // of its own: both are windows, and a window may only be shown or hidden from
+    // a relayout.
     updateOverlay(w, state);
-    updateOutline(w, state);
+    updateCanvas(w, state);
 
     if (inserted) {
         state.rect.snap(frameRect(w));
@@ -1290,11 +1290,11 @@ void ThumbnailBloomEffect::retarget(
 
     // The ground this trip sets off from: where the thumbnail was last painted,
     // where it stands at this moment (which is the real window, shadow and all,
-    // when a window is only just blooming out) and the resting rectangle its
-    // caption sits on. Everything past the first frame is asked for by the paint
-    // pass itself, which widens the damage of the frame by the ground every
-    // running animation moves over and then asks for the next frame over the
-    // same, so this is the one repaint a whole trip needs.
+    // when a window is only just blooming out) and the rectangle it is heading
+    // for. Everything past the first frame is asked for by the paint pass itself,
+    // which widens the damage of the frame by the ground every running animation
+    // moves over and then asks for the next frame over the same, so this is the
+    // one repaint a whole trip needs.
     const QRectF ground
         = thumbnailBounds(w, state.rect.current).united(state.painted).united(state.base);
     if (!ground.isNull()) {
@@ -1467,21 +1467,13 @@ void ThumbnailBloomEffect::forget(EffectWindow *w)
         }
 
         setSnapshot(w, it->second, false);
-
-        // The handles go with the state, so that nothing is left claiming a
-        // surface that is on its way out.
-        m_drawnOverlays.erase(it->second.overlay.get());
-        m_drawnOverlays.erase(it->second.outline.get());
-        m_ownOverlays.erase(it->second.overlay.get());
-        m_ownOverlays.erase(it->second.outline.get());
-        m_ownOverlays.erase(it->second.shield.get());
     }
 
     auto node = m_states.extract(w);
     if (!node.empty()) {
         for (OverlayWindow *window :
             { static_cast<OverlayWindow *>(node.mapped().overlay.release()),
-                static_cast<OverlayWindow *>(node.mapped().outline.release()),
+                static_cast<OverlayWindow *>(node.mapped().canvas.release()),
                 node.mapped().shield.release() }) {
             if (window) {
                 window->disconnect();
@@ -1573,31 +1565,22 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
 
     // Both ends of a thumbnail's life: the trip back to its own window and the
     // dive into the point its screen collapses to. Neither leaves anything to
-    // click, and both have a caption to fade out first.
+    // click.
     const bool leaving = sameRect(state.base, frameRect(w)) || state.diving;
     if (leaving || state.hitRegion.isEmpty()) {
+        // Nothing is drawn on a click target, so one with nothing left to click
+        // has no reason to stay up: what is still fading out on the way home or
+        // into the burst point is the store, and that one lives on until the
+        // trip is over.
         state.hitRegion = QRegion();
         if (state.overlay) {
-            // A thumbnail on its way out keeps its click target up, where it is,
-            // for as long as the caption is still fading out on it. It must not
-            // act as a thumbnail any more though, so it is made output only; the
-            // state (and with it the window) is dropped once the trip ends.
-            if (leaving && state.caption.current > 0) {
-                state.overlay->setOutputOnly(true);
-            } else {
-                state.overlay->hide();
-                state.overlayWindow = nullptr;
-            }
+            state.overlay->hide();
         }
         return;
     }
 
     if (!state.overlay) {
         state.overlay = std::make_unique<ThumbnailOverlay>();
-        // Registered before it is ever shown: from the moment it is, the paint
-        // pass and the layout both have to recognise it for one of its own.
-        m_ownOverlays.insert(state.overlay.get());
-        m_drawnOverlays.insert(state.overlay.get());
         connect(state.overlay.get(), &ThumbnailOverlay::activated, this,
             [w]() { effects->activateWindow(w); });
         connect(state.overlay.get(), &ThumbnailOverlay::dragStarted, this,
@@ -1608,24 +1591,11 @@ void ThumbnailBloomEffect::updateOverlay(EffectWindow *w, BloomState &state)
             [this, w](const QPointF &pos) { openWindowMenu(w, pos); });
     }
 
-    state.overlay->setOutputOnly(false);
-
-    // The caption is drawn by the click target, which is the one surface of a
-    // thumbnail the compositor paints exactly once per frame.
-    state.overlay->setCaption(
-        m_showIcons ? w->icon() : QIcon(), m_showTitles ? w->caption() : QString());
-    state.overlay->setCaptionOpacity(state.caption.current);
-
     // The resting rectangle, never the current one: the click target must not
     // travel with the animation, and never grows with the hover either.
     state.overlay->setGeometry(rect);
     setOverlayMask(state.overlay.get(), state.hitRegion.translated(-rect.topLeft()));
     showOverlay(state.overlay.get());
-
-    // Every show() makes a fresh window of the click target, so the one the
-    // scene knows is picked up here rather than looked up again on every frame
-    // that paints a caption.
-    state.overlayWindow = effects->findWindow(state.overlay.get());
 }
 
 void ThumbnailBloomEffect::updateShields()
@@ -1730,9 +1700,6 @@ QRegion ThumbnailBloomEffect::placeShield(
     }
     if (!state.shield) {
         state.shield = std::make_unique<OverlayWindow>();
-        // Registered before it is ever shown: from the moment it is, the rest of
-        // the effect has to recognise it for one of its own.
-        m_ownOverlays.insert(state.shield.get());
     }
     const QRect bounds = exposed.boundingRect();
     state.shield->setGeometry(bounds);
@@ -1769,22 +1736,15 @@ bool ThumbnailBloomEffect::isRelevant(EffectWindow *w) const
     return w->isNormalWindow() || w->isDialog();
 }
 
-// Both of these are asked once per internal window in the paint pass and again
-// for every window of the stack in the layout, so they go through a set of the
-// handles rather than through the states.
-
-bool ThumbnailBloomEffect::isDrawnOverlay(EffectWindow *w) const
-{
-    const QWindow *handle = w->internalWindow();
-    // The shields paint nothing, so only the click targets and the frames are
-    // of interest.
-    return handle && m_drawnOverlays.contains(handle);
-}
+// Every surface of the effect's own is an OverlayWindow and nothing else in the
+// process is, so the type answers this and no register of handles has to be kept
+// in step with the states. A client window has no QWindow at all, whatever
+// process it came from, so the whole of the stack but the internal windows is
+// answered by the null check.
 
 bool ThumbnailBloomEffect::isOwnOverlay(EffectWindow *w) const
 {
-    const QWindow *handle = w->internalWindow();
-    return handle && m_ownOverlays.contains(handle);
+    return qobject_cast<OverlayWindow *>(w->internalWindow()) != nullptr;
 }
 
 void ThumbnailBloomEffect::updateSystemRegion()
@@ -1975,8 +1935,8 @@ GLShader *ThumbnailBloomEffect::filterShader()
     // a thumbnail is drawn from the mip chain instead when it cannot be had.
     if (!m_filterShaderBuilt) {
         m_filterShaderBuilt = true;
-        m_filterShader = ShaderManager::instance()->generateCustomShader(
-            ShaderTrait::MapTexture | ShaderTrait::Modulate | ShaderTrait::AdjustSaturation
+        m_filterShader = ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture
+                | ShaderTrait::Modulate | ShaderTrait::AdjustSaturation
                 | ShaderTrait::TransformColorspace,
             QByteArray(), QByteArray(filterFragmentSource));
     }
@@ -2052,9 +2012,8 @@ void ThumbnailBloomEffect::paintSnapshot(const RenderTarget &renderTarget,
     // the same uniforms for that reason.
     GLShader *shader = filterShader();
     if (!shader) {
-        shader = ShaderManager::instance()->shader(ShaderTrait::MapTexture
-            | ShaderTrait::Modulate | ShaderTrait::AdjustSaturation
-            | ShaderTrait::TransformColorspace);
+        shader = ShaderManager::instance()->shader(ShaderTrait::MapTexture | ShaderTrait::Modulate
+            | ShaderTrait::AdjustSaturation | ShaderTrait::TransformColorspace);
     }
     ShaderBinder binder(shader);
 
@@ -2098,11 +2057,12 @@ void ThumbnailBloomEffect::paintSnapshot(const RenderTarget &renderTarget,
     mvp.translate(std::round(w->x() * scale), std::round(w->y() * scale));
 
     const auto toXYZ = renderTarget.colorDescription()->containerColorimetry().toXYZ();
-    shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp * data.toMatrix(scale));
+    shader->setUniform(
+        GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp * data.toMatrix(scale));
     shader->setUniform(GLShader::Vec4Uniform::ModulationConstant, QVector4D(rgb, rgb, rgb, alpha));
     shader->setUniform(GLShader::FloatUniform::Saturation, data.saturation());
-    shader->setUniform(GLShader::Vec3Uniform::PrimaryBrightness,
-        QVector3D(toXYZ(1, 0), toXYZ(1, 1), toXYZ(1, 2)));
+    shader->setUniform(
+        GLShader::Vec3Uniform::PrimaryBrightness, QVector3D(toXYZ(1, 0), toXYZ(1, 1), toXYZ(1, 2)));
     shader->setUniform(GLShader::IntUniform::TextureWidth, state.texture->width());
     shader->setUniform(GLShader::IntUniform::TextureHeight, state.texture->height());
     shader->setColorspaceUniforms(
@@ -2297,10 +2257,7 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         state.caption.interpolate(progress);
         state.bend.interpolate(progress);
         state.highlight.interpolate(progress);
-        if (state.overlay) {
-            state.overlay->setCaptionOpacity(state.caption.current);
-        }
-        refreshOutline(w, state);
+        refreshCanvas(w, state);
 
         state.painted = paintedArea(w, state);
 
@@ -2308,9 +2265,7 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         // the one and draws the other. The two are taken together rather than as
         // a pair, which covers the ground between them as well: a thumbnail
         // moves in a straight line, and a step large enough to leave a gap would
-        // otherwise leave a trail in it. The resting rectangle comes along
-        // because the caption is painted there, and the hover can have the
-        // thumbnail itself elsewhere.
+        // otherwise leave a trail in it.
         //
         // The frame a trip ends on is measured like every other one, and before
         // the state is dropped rather than after: that step moves the thumbnail
@@ -2619,13 +2574,18 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion,
     WindowPaintData &data)
 {
-    // A click target is an internal window, and KWin puts every one of those in
-    // the topmost layer, so painting it where it is in the stack would show its
-    // caption over whatever covers the thumbnail. It is left out here and drawn
-    // again right after the window it belongs to, which is what gives the
-    // caption the depth of its own thumbnail: from there the compositor covers
-    // the two together, and nothing has to be worked out from geometry.
-    if (isDrawnOverlay(w)) {
+    // Every surface of the effect's own is left out here. A store is an internal
+    // window, and KWin puts every one of those in the topmost layer, so painting
+    // it where it is in the stack would show the frame and the caption over
+    // whatever covers the thumbnail; it is drawn again right after the window it
+    // belongs to instead, which is what gives both of them the depth of their own
+    // thumbnail. From there the compositor covers picture, frame and caption
+    // together, and nothing has to be worked out from geometry.
+    //
+    // The click targets and the shields are never drawn again at all. They take
+    // input and paint nothing, and a window that paints nothing is still a
+    // transparent quad the scene blends over the damage on every frame.
+    if (isOwnOverlay(w)) {
         return;
     }
 
@@ -2656,10 +2616,8 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
         Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
 
         if (it != m_states.end()) {
-            drawOutline(renderTarget, viewport, it->second, deviceRegion);
+            drawCanvas(renderTarget, viewport, it->second, deviceRegion);
         }
-
-        drawCaption(renderTarget, viewport, w, deviceRegion);
     }
 
     // Always in this order, which is what puts the hovered thumbnail over the
@@ -2744,83 +2702,49 @@ void ThumbnailBloomEffect::drawLifted(const RenderTarget &renderTarget,
         effects->drawWindow(renderTarget, viewport, w,
             PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
 
-        // The outline follows the thumbnail rather than the lift: every one of
-        // them is framed, and the highlight channel only decides how thick and
-        // in what colour. See refreshOutline(). Over the thumbnail here as
-        // everywhere, out of the reach of its shadow.
-        drawOutline(renderTarget, viewport, it->second, deviceRegion);
-
-        // The caption of a lifted thumbnail follows it here, so that it ends up
-        // over the thumbnail rather than under it, like every other one does.
-        // Over the outline as well, the icon and the title being what a corner of
-        // the frame gives way to.
-        drawCaption(renderTarget, viewport, w, deviceRegion);
+        // The store follows the thumbnail rather than the lift: every one of them
+        // is framed and captioned, and the highlight channel only decides how
+        // thick the line is and in what colour. See refreshCanvas(). Drawn here
+        // so that the frame and the caption of a lifted thumbnail end up over it
+        // rather than under it, as they do everywhere else, and out of the reach
+        // of its shadow.
+        drawCanvas(renderTarget, viewport, it->second, deviceRegion);
     }
 }
 
-void ThumbnailBloomEffect::drawCaption(const RenderTarget &renderTarget,
-    const RenderViewport &viewport, EffectWindow *w, const Region &deviceRegion)
-{
-    const auto it = m_states.find(w);
-    if (it == m_states.end()) {
-        return;
-    }
-
-    // Kept from the relayout that placed the click target rather than looked up
-    // here: this runs for every bloomed window of every frame, and the lookup
-    // walks the internal windows, of which the effect itself makes two per
-    // thumbnail. The pointer empties itself if the window goes away behind the
-    // effect's back, and the lookup is done again then rather than the caption
-    // being dropped for the frame.
-    BloomState &state = it->second;
-    if (!state.overlayWindow && state.overlay) {
-        state.overlayWindow = effects->findWindow(state.overlay.get());
-    }
-
-    EffectWindow *overlay = state.overlayWindow;
-    if (!overlay || !overlay->isVisible()) {
-        return;
-    }
-
-    // Drawn untransformed and where it is: the click target already sits on the
-    // resting rectangle of the thumbnail, so all this changes is the moment of
-    // the draw, and the region it is clipped to is the one of that moment.
-    WindowPaintData data;
-    effects->drawWindow(renderTarget, viewport, overlay,
-        PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
-}
-
-void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
+void ThumbnailBloomEffect::drawCanvas(const RenderTarget &renderTarget,
     const RenderViewport &viewport, BloomState &state, const Region &deviceRegion)
 {
-    // Kept from the relayout that placed the frame rather than looked up here,
-    // for the same reason as the caption: this runs for every bloomed window of
-    // every frame, and the lookup walks the internal windows.
-    if (!state.outlineWindow && state.outline) {
-        state.outlineWindow = effects->findWindow(state.outline.get());
+    // Kept from the relayout that put the store up rather than looked up here:
+    // this runs for every bloomed window of every frame, and the lookup walks the
+    // internal windows. The pointer empties itself if the window goes away behind
+    // the effect's back, and the lookup is done again then rather than the
+    // thumbnail losing its frame for the frame.
+    if (!state.canvasWindow && state.canvas) {
+        state.canvasWindow = effects->findWindow(state.canvas.get());
     }
 
-    EffectWindow *overlay = state.outlineWindow;
+    EffectWindow *overlay = state.canvasWindow;
     if (!overlay || !overlay->isVisible()) {
         return;
     }
 
     // Normally nothing is transformed here, which is the whole point of the
-    // frame store: refreshOutline() has moved it onto the thumbnail and painted
-    // the line into it at the size this very frame draws, in this very turn, so
-    // the window is drawn where it is and at the size it is. Scaling it is what
-    // used to soften the line on a thumbnail the pointer had grown, and the
-    // smaller the thumbnail the further it was scaled.
+    // store: refreshCanvas() has moved it onto the thumbnail and painted the line
+    // and the caption into it at the size this very frame draws, in this very
+    // turn, so the window is drawn where it is and at the size it is. Scaling it
+    // is what used to soften the line on a thumbnail the pointer had grown, and
+    // the smaller the thumbnail the further it was scaled.
     //
     // What the store holds is asked all the same, rather than assumed: a paint
     // can be missed (a window not yet exposed, a geometry KWin has not committed
-    // yet), and a frame of the thumbnail drawn with the line of the frame before
+    // yet), and a frame of the thumbnail drawn with the store of the frame before
     // is a line lagging behind its thumbnail. So the buffer is put where it
     // belongs whatever is in it, which at worst is the step before this one and
     // a scale of a few hundredths.
     WindowPaintData data;
     const QRectF rect = state.rect.current;
-    const QRectF shown = state.outline ? state.outline->shownRect() : QRectF();
+    const QRectF shown = state.canvas ? state.canvas->shownRect() : QRectF();
     if (!rect.isEmpty() && !shown.isEmpty()) {
         const QPointF origin = overlay->frameGeometry().topLeft();
         const QRectF painted(origin + shown.topLeft(), shown.size());
@@ -2841,21 +2765,21 @@ void ThumbnailBloomEffect::drawOutline(const RenderTarget &renderTarget,
         PAINT_WINDOW_TRANSFORMED | PAINT_WINDOW_TRANSLUCENT, deviceRegion, data);
 }
 
-void ThumbnailBloomEffect::updateOutline(EffectWindow *w, BloomState &state)
+void ThumbnailBloomEffect::updateCanvas(EffectWindow *w, BloomState &state)
 {
     // Only ever reached from the relayout pass, like the click target: hiding an
     // internal window makes KWin destroy it synchronously, which must not happen
     // under pointer dispatch or under the effect chain.
     //
     // A window travelling back to its own geometry stops being a thumbnail, but
-    // it keeps its frame for as long as there is any of it left to fade out;
-    // refreshOutline() is what empties it, and the state is dropped once the
-    // trip ends.
+    // it keeps its store for as long as there is any frame or caption left to
+    // fade out; refreshCanvas() is what empties it, and the state is dropped once
+    // the trip ends.
     const bool leaving = sameRect(state.base, frameRect(w)) || state.diving;
     if (leaving && state.caption.current <= 0.0 && state.highlight.current <= 0.0) {
-        if (state.outline) {
-            state.outline->hide();
-            state.outlineWindow = nullptr;
+        if (state.canvas) {
+            state.canvas->hide();
+            state.canvasWindow = nullptr;
         }
         return;
     }
@@ -2864,34 +2788,40 @@ void ThumbnailBloomEffect::updateOutline(EffectWindow *w, BloomState &state)
     // point its screen collapses to. A store already up keeps the size it has,
     // the frame inside it shrinking with the thumbnail; one that is not up has
     // nothing to be sized by and is not put up at all.
-    if (!state.outline && state.base.isEmpty()) {
+    if (!state.canvas && state.base.isEmpty()) {
         return;
     }
 
-    if (!state.outline) {
-        state.outline = std::make_unique<OutlineOverlay>();
-        // Registered before it is ever shown: from the moment it is, the paint
-        // pass and the layout both have to recognise it for one of its own.
-        m_ownOverlays.insert(state.outline.get());
-        m_drawnOverlays.insert(state.outline.get());
+    if (!state.canvas) {
+        state.canvas = std::make_unique<ThumbnailCanvas>();
     }
 
-    // Where the store goes and how large it is are settled by refreshOutline(),
-    // which runs for every frame of every animation; it is called here so that a
-    // frame store put up for the first time is already on its thumbnail when it
-    // is shown.
-    refreshOutline(w, state);
-    showOverlay(state.outline.get());
+    // Everything the caption is made of is settled here rather than in
+    // refreshCanvas(): the icon, the title and the size they are laid out for all
+    // change when the window changes, which is a relayout, and the store drops the
+    // picture it made of them whenever they do. The size is the resting one, so
+    // that the caption is laid out once and carried along a trip rather than laid
+    // out again for every size the picture passes through; laying it out against
+    // the travelling rectangle would mean blurring its two shadows on every frame.
+    state.canvas->setCaption(m_showIcons ? w->icon() : QIcon(),
+        m_showTitles ? w->caption() : QString(), state.base.size());
 
-    // Every show() makes a fresh window of the frame, so the one the scene knows
+    // Where the store goes and how large it is are settled by refreshCanvas(),
+    // which runs for every frame of every animation; it is called here so that a
+    // store put up for the first time is already on its thumbnail when it is
+    // shown.
+    refreshCanvas(w, state);
+    showOverlay(state.canvas.get());
+
+    // Every show() makes a fresh window of the store, so the one the scene knows
     // is picked up here rather than looked up again on every frame that draws
     // one.
-    state.outlineWindow = effects->findWindow(state.outline.get());
+    state.canvasWindow = effects->findWindow(state.canvas.get());
 }
 
-void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
+void ThumbnailBloomEffect::refreshCanvas(EffectWindow *w, BloomState &state)
 {
-    if (!state.outline) {
+    if (!state.canvas) {
         return;
     }
 
@@ -2913,7 +2843,7 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
 
     const QRectF rect = state.rect.current;
     if (rect.isEmpty() || strength <= outlineEpsilon) {
-        state.outline->setOutline(QRectF(), { }, 0.0, color, 0.0);
+        state.canvas->setContent(QRectF(), {}, 0.0, color, 0.0, 0.0);
         return;
     }
 
@@ -2946,8 +2876,8 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
         static_cast<int>(std::ceil(std::max(ends.width(), rect.width()))) + 2 * pad + step,
         static_cast<int>(std::ceil(std::max(ends.height(), rect.height()))) + 2 * pad + step);
     const QRect geometry(origin, size);
-    if (state.outline->geometry() != geometry) {
-        state.outline->setGeometry(geometry);
+    if (state.canvas->geometry() != geometry) {
+        state.canvas->setGeometry(geometry);
     }
 
     // Where the thumbnail sits inside the store, down to the fraction of a pixel
@@ -2978,7 +2908,9 @@ void ThumbnailBloomEffect::refreshOutline(EffectWindow *w, BloomState &state)
     const std::array<QPointF, 4> corners = { bend.map(inner.topLeft()), bend.map(inner.topRight()),
         bend.map(inner.bottomRight()), bend.map(inner.bottomLeft()) };
 
-    state.outline->setOutline(base, corners, width, color, strength);
+    // The caption hangs from the same rectangle the line is drawn around, so it
+    // travels with the picture; how opaque it is comes from its own channel.
+    state.canvas->setContent(base, corners, width, color, strength, state.caption.current);
 }
 
 void ThumbnailBloomEffect::postPaintScreen()
