@@ -127,19 +127,30 @@ static qreal deviceScale(const EffectWindow *w)
  *
  * KWin's own shader for a window under the traits paintSnapshot() asks for,
  * with one thing changed: where it takes a single sample of the texture, this
- * averages the texture over exactly the piece of it the pixel being drawn
- * covers. Everything after the sampling is the stock pipeline, included
- * straight out of KWin's own shader sources, so a thumbnail is coloured,
- * saturated and faded exactly as the window itself would have been.
+ * resamples the texture with a cubic kernel scaled to the piece of it the pixel
+ * being drawn covers. Everything after the sampling is the stock pipeline,
+ * included straight out of KWin's own shader sources, so a thumbnail is
+ * coloured, saturated and faded exactly as the window itself would have been.
  *
  * One sample is what makes a shrunk window shimmer. A thumbnail at a third of
  * its window's size has each of its pixels standing for some nine of the
  * window's, and a single sample picks one of the nine and throws the rest away:
  * which one it picks moves as the thumbnail moves, so busy areas crawl, and
- * letters come out thick in one place and thin in the next. Averaging the nine
+ * letters come out thick in one place and thin in the next. Weighing the nine
  * gives the pixel the colour it actually ought to be, and gives it that colour
  * wherever the thumbnail happens to have got to, so a stem of a letter weighs
  * the same at every step of an animation.
+ *
+ * Which weights is the second question, and the answer is Catmull-Rom rather
+ * than a plain average. A box the size of the pixel is exact about area and
+ * poor about everything else: it lets a good deal through above the frequency
+ * the thumbnail can show (which is the aliasing) and cuts away a good deal
+ * below it (which is the softness), so text comes out grey and thick at once.
+ * A cubic reaches two footprints either side of the pixel with a negative lobe
+ * on each side, which is what puts the contrast of an edge back and rolls the
+ * rest off more steeply. The lobes are what a downscaler that is any good
+ * uses, and the one chosen here is the polynomial one, since a sinc costs a
+ * transcendental per texel and rings more for it.
  *
  * The mip chain is what makes that affordable. Trilinear filtering already
  * measures the pixel: it takes the very same derivatives and picks the level
@@ -147,15 +158,13 @@ static qreal deviceScale(const EffectWindow *w)
  * since one bilinear sample is a tent across two texels wherever it happens to
  * fall rather than the pixel's own footprint, and no level is ever exactly the
  * right size, so it blends the two nearest and comes out soft. This picks the
- * level itself, finest first, and then weighs the pixel out of it properly. A
- * level is only ever reached for when the picture is too coarse for the taps
- * below to weigh the footprint texel by texel, so a thumbnail at a sixth of
- * its window or larger, which is every size the layout ever settles on and a
- * good deal past it, is measured against the full sized picture and comes out
- * exact. A smaller one
- * borrows a level, where the texels in the middle of its footprint are already
- * the averages it would have worked out and only the two at either end are
- * taken as evenly filled.
+ * level itself, the finest one whose texels the footprint spans no more than
+ * two of, and weighs the kernel out of it texel by texel. Level zero for a
+ * thumbnail down to half its window, one level further down for every halving
+ * after that, so the taps a pixel costs never grow however small the thumbnail
+ * is drawn: sixteen at the very worst, nine for a footprint of one texel, and
+ * that is a bicubic for a thumbnail drawn at its window's own size or larger,
+ * which is where the pointer grows one to.
  *
  * A thumbnail in motion is drawn by the stock shader instead, which takes a
  * single sample off the same chain. What this works out is a good deal more
@@ -171,51 +180,104 @@ out vec4 fragColor;
 #include "saturation.glsl"
 #include "colormanagement.glsl"
 
-// How many pairs of texels one axis of a footprint may be read as, and how wide
-// a footprint that leaves room for: one of n texels falls across n + 1 of them
-// at worst, so four pairs weigh six texels exactly. A pixel is answered in four
-// samples at the sizes the layout settles on, in nine down to a quarter and in
-// sixteen at the very worst, and the level below is what keeps the count there
-// however small a thumbnail becomes.
-const int maxPairs = 4;
-const float maxTexels = float(2 * maxPairs - 2);
+// The widest footprint, in texels of the level chosen, that is weighed out of
+// that level, and the taps that costs per axis. The kernel reaches two
+// footprints either side of the pixel, so its middle lobe spans at most four
+// texels and each outer lobe at most two, which is two pairs and one pair.
+// Raising the footprint to three would keep a thumbnail at a third on level
+// zero, at seven taps per axis instead of four.
+const float maxFootprint = 2.0;
+const int sidePairs = 1;
+const int centrePairs = 2;
+const int axisTaps = 2 * sidePairs + centrePairs;
 
 /*
- * Where to sample pair k of the footprint that runs from a to b, in texels, and
- * how much of the footprint that sample stands for.
- *
- * The two texels of a pair are read as one bilinear sample placed between them,
- * so that the hardware's own interpolation comes out at exactly the weights the
- * two texels are covered by. A whole footprint is therefore read in half as
- * many samples as it covers texels, and every texel is weighted by how much of
- * the pixel it really falls under.
+ * Catmull-Rom at x, in footprints: one at the centre, zero at one and beyond
+ * two, and below zero in between.
  */
-vec2 footprintTap(float a, float b, int k)
+float cubic(float x)
 {
-    float first = floor(a) + float(2 * k);
-    float w0 = clamp(min(b, first + 1.0) - max(a, first), 0.0, 1.0);
-    float w1 = clamp(min(b, first + 2.0) - max(a, first + 1.0), 0.0, 1.0);
-    float weight = w0 + w1;
-    return vec2(first + 0.5 + (weight > 0.0 ? w1 / weight : 0.0), weight);
+    x = abs(x);
+    if (x < 1.0) {
+        return ((1.5 * x - 2.5) * x) * x + 1.0;
+    }
+    if (x < 2.0) {
+        return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
+    }
+    return 0.0;
 }
 
-/* The texture averaged over the piece of it this pixel covers. */
-vec4 footprintAverage()
+/*
+ * The tap standing for the texels first and first + 1 of a lobe of the kernel
+ * that ends at texel last, for a pixel centred at c with a footprint of f
+ * texels: where to sample, and the weight the sample carries.
+ *
+ * The two texels are read as one bilinear sample placed between them, so that
+ * the hardware's own interpolation comes out at exactly the two weights the
+ * kernel gives them, and a lobe is therefore read in half as many samples as
+ * it spans texels. That only works for weights of one sign, which is why a tap
+ * never crosses out of its lobe: a texel past the end of it is given no weight
+ * here and is weighed by the tap of the lobe it belongs to instead.
+ */
+vec2 lobeTap(float c, float f, int first, int last)
+{
+    float w0 = first <= last ? cubic((float(first) + 0.5 - c) / f) : 0.0;
+    float w1 = first + 1 <= last ? cubic((float(first) + 1.5 - c) / f) : 0.0;
+    float weight = w0 + w1;
+    return vec2(float(first) + 0.5 + (weight != 0.0 ? w1 / weight : 0.0), weight);
+}
+
+/*
+ * The taps of one axis for a pixel centred at c with a footprint of f texels,
+ * and the sum of their weights, which the kernel sampled at whole texels does
+ * not quite bring to one.
+ *
+ * The kernel is cut at its zero crossings into three lobes, each holding the
+ * texels whose centres fall in it, and each lobe is paired up from its own
+ * first texel. Every tap stays inside its lobe, so no bilinear sample is ever
+ * asked to mix a positive weight with a negative one.
+ */
+void tapsAlong(float c, float f, out vec2 taps[axisTaps], out float total)
+{
+    // The first texel of each lobe and the last one of the whole kernel, texel
+    // i standing for the span from i to i + 1 and so centred on i + 0.5.
+    int first0 = int(ceil(c - 2.0 * f - 0.5));
+    int first1 = int(ceil(c - f - 0.5));
+    int first2 = int(ceil(c + f - 0.5));
+    int last = int(ceil(c + 2.0 * f - 0.5)) - 1;
+
+    total = 0.0;
+    for (int k = 0; k < sidePairs; ++k) {
+        taps[k] = lobeTap(c, f, first0 + 2 * k, first1 - 1);
+        total += taps[k].y;
+    }
+    for (int k = 0; k < centrePairs; ++k) {
+        taps[sidePairs + k] = lobeTap(c, f, first1 + 2 * k, first2 - 1);
+        total += taps[sidePairs + k].y;
+    }
+    for (int k = 0; k < sidePairs; ++k) {
+        taps[sidePairs + centrePairs + k] = lobeTap(c, f, first2 + 2 * k, last);
+        total += taps[sidePairs + centrePairs + k].y;
+    }
+}
+
+/* The texture resampled over the piece of it this pixel covers. */
+vec4 footprintSample()
 {
     // The pixel being drawn, pulled back into the picture. The derivatives are
     // how far one pixel of the screen reaches into it in either direction,
     // which is the whole answer: they carry the scale of the thumbnail, the
     // bend, and whatever fraction of a pixel it has got to, without any of it
-    // being worked out here. The box around them is what gets averaged.
+    // being worked out here. The box around them is the footprint.
     vec2 size = vec2(textureSize(sampler, 0));
     vec2 reach = (abs(dFdx(texcoord0)) + abs(dFdy(texcoord0))) * size;
 
-    // The finest level of the chain whose texels the footprint falls across few
-    // enough of to be weighed one by one. Level zero for anything down to a
-    // sixth, and one level further down for every halving after that, so the
-    // work of a pixel never grows however small the thumbnail is drawn.
+    // The finest level of the chain whose texels the footprint spans no more
+    // than maxFootprint of. Level zero for anything down to a half, and one
+    // level further down for every halving after that, so the work of a pixel
+    // never grows however small the thumbnail is drawn.
     float deepest = floor(log2(max(size.x, size.y)));
-    float level = clamp(ceil(log2(max(reach.x, reach.y) / maxTexels)), 0.0, deepest);
+    float level = clamp(ceil(log2(max(reach.x, reach.y) / maxFootprint)), 0.0, deepest);
 
     // Everything from here on is in the texels of that level, which are asked
     // for rather than halved out of the size above: a level of a picture whose
@@ -225,43 +287,51 @@ vec4 footprintAverage()
     vec2 texels = vec2(textureSize(sampler, lod));
     vec2 centre = texcoord0 * texels;
 
-    // Never narrower than one texel. A footprint of exactly one texel weighs
-    // the two texels it straddles by how far it laps onto each, which is
-    // ordinary bilinear interpolation, so a thumbnail drawn at its window's own
-    // size or larger comes out of this untouched.
-    vec2 extent = clamp(reach * texels / size, vec2(1.0), vec2(maxTexels + 1.0));
-    vec2 a = centre - 0.5 * extent;
-    vec2 b = centre + 0.5 * extent;
+    // Never narrower than one texel. A footprint of one is the kernel at its
+    // own width, which is ordinary bicubic interpolation, so a thumbnail drawn
+    // at its window's own size or larger is magnified rather than blurred.
+    vec2 extent = clamp(reach * texels / size, vec2(1.0), vec2(maxFootprint));
+
+    // Kept in arrays rather than worked out again per pair: the loops are short
+    // and fixed, so the compiler unrolls them and every index is a constant,
+    // which keeps the arrays in registers.
+    vec2 tapX[axisTaps];
+    vec2 tapY[axisTaps];
+    float totalX;
+    float totalY;
+    tapsAlong(centre.x, extent.x, tapX, totalX);
+    tapsAlong(centre.y, extent.y, tapY, totalY);
 
     vec4 sum = vec4(0.0);
-    float total = 0.0;
-    for (int j = 0; j < maxPairs; ++j) {
-        vec2 tapY = footprintTap(a.y, b.y, j);
-        if (tapY.y <= 0.0) {
+    for (int j = 0; j < axisTaps; ++j) {
+        if (tapY[j].y == 0.0) {
             continue;
         }
-        for (int i = 0; i < maxPairs; ++i) {
-            // Worked out here rather than kept in an array of its own: the
-            // loops are short and fixed, so the compiler unrolls them and the
-            // repeated halves fall together, while an array indexed by a
-            // counter can land in memory instead of in registers.
-            vec2 tapX = footprintTap(a.x, b.x, i);
-            float weight = tapX.y * tapY.y;
-            if (weight <= 0.0) {
+        for (int i = 0; i < axisTaps; ++i) {
+            if (tapX[i].y == 0.0) {
                 continue;
             }
             // The level is named rather than left to the hardware, which would
             // blend this one with the next and undo the point of choosing it.
-            sum += weight * textureLod(sampler, vec2(tapX.x, tapY.x) / texels, level);
-            total += weight;
+            sum += (tapX[i].y * tapY[j].y)
+                * textureLod(sampler, vec2(tapX[i].x, tapY[j].x) / texels, level);
         }
     }
-    return sum / total;
+    vec4 result = sum / (totalX * totalY);
+
+    // The negative lobes overshoot at a hard edge, and the store is
+    // premultiplied: an alpha past one or a colour past its alpha would
+    // brighten or darken whatever the thumbnail is blended over along the
+    // edge of its shadow, so the result is held to what a premultiplied
+    // texel can be.
+    result.a = clamp(result.a, 0.0, 1.0);
+    result.rgb = clamp(result.rgb, vec3(0.0), vec3(result.a));
+    return result;
 }
 
 void main()
 {
-    vec4 result = footprintAverage();
+    vec4 result = footprintSample();
     result = encodingToNits(result, sourceNamedTransferFunction,
         sourceTransferFunctionParams.x, sourceTransferFunctionParams.y);
     result.rgb = (colorimetryTransform * vec4(result.rgb, 1.0)).rgb;
@@ -278,7 +348,7 @@ void main()
  *
  * One for the picture itself and one for every halving of it down to a single
  * pixel, which is the whole chain. The shader above reaches for a level only
- * once a thumbnail is drawn below a sixth of its window's size, while the
+ * once a thumbnail is drawn below half of its window's size, while the
  * trilinear path every thumbnail in motion takes reaches for all of them, so
  * the tail earns its keep either way: every level but the first is a quarter of
  * the one above it, which makes the whole chain a third of the picture again.

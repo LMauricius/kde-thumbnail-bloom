@@ -616,7 +616,7 @@ private:
     bool m_showIcons = true;
     bool m_showTitles = true;
     qreal m_thumbnailOpacity = 0.9; //!< opacity of a thumbnail that is not hovered
-    //! Draws a thumbnail out of its store, averaging the texture over each pixel.
+    //! Draws a thumbnail out of its store, resampling the texture under each pixel.
     std::unique_ptr<KWin::GLShader> m_filterShader;
     bool m_filterShaderBuilt = false; //!< whether building it has been tried at all
     qreal m_bendAngle
