@@ -91,6 +91,19 @@ sudo cmake --install build
 
 Then enable "Thumbnail Bloom" in System Settings, Desktop Effects.
 
+## Building Debian package
+
+The supplied `debian/` packaging scripts are sufficient to create proper binary packages for Debian.
+
+```
+debian/gen-changelog.sh     # create new debian/changelog (required!)
+sudo apt-get build-dep .    # install the build dependencies (only once)
+dpkg-buildpackage -us -uc   # build Debian package that isn't signed¹
+sudo dpkg -i ../kde-thumbnail-bloom_${version}_${arch}.deb
+```
+
+¹ if you got a gpg key set-up and want to sign the package change the author line
+  in `debian/changelog` to your name/mail adresse accordingly and drop `-us -uc`.
 
 ## Disabling/Reloading from terminal
 To disable the effect from terminal, run:
