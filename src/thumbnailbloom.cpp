@@ -800,6 +800,8 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
     m_relayoutTimer.setSingleShot(true);
     m_relayoutTimer.setInterval(0);
     connect(&m_relayoutTimer, &QTimer::timeout, this, &ThumbnailBloomEffect::relayout);
+    m_burstTimer.setSingleShot(true);
+    connect(&m_burstTimer, &QTimer::timeout, this, &ThumbnailBloomEffect::releaseBurst);
 
     connect(effects, &EffectsHandler::windowAdded, this, [this](EffectWindow *w) {
         // The first internal window to appear while a window menu is being
@@ -814,17 +816,10 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
             return;
         }
         watch(w);
-        // A window opening on top of its screen is one the compositor is
-        // animating in, and the thumbnails it pushes into bloom wait for that
-        // to be over. One opening under the others changes nothing up there.
-        // A maximized one is the exception: it takes the screen over, so every
-        // thumbnail there dives into it, and that dive plays along with the
-        // window coming in rather than after it.
-        if (topsScreen(w) && !isMaximized(w)) {
-            delayRelayout(Transition::Open);
-        } else {
-            scheduleRelayout();
-        }
+        // A burst this brings about comes out of a window the compositor is
+        // animating in.
+        m_burstCause = Transition::Open;
+        scheduleRelayout();
     });
     connect(effects, &EffectsHandler::windowClosed, this, [this](EffectWindow *w) {
         if (w == m_menuPopup) {
@@ -837,14 +832,13 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
             return;
         }
         forget(w);
-        // A window of the layout closing is animated out by the compositor, and
-        // the thumbnails coming home or shuffling up wait for that. Asked of the
-        // last layout's set rather than of the window, which is deleted by now.
+        // A burst this brings about plays where a window is being animated out.
+        // Asked of the last layout's set rather than of the window, which is
+        // deleted by now: a tooltip closing animates nothing worth waiting for.
         if (m_relevantWindows.count(w)) {
-            delayRelayout(Transition::Close);
-        } else {
-            scheduleRelayout();
+            m_burstCause = Transition::Close;
         }
+        scheduleRelayout();
     });
     connect(effects, &EffectsHandler::windowDeleted, this, [this](EffectWindow *w) { forget(w); });
     connect(effects, &EffectsHandler::windowActivated, this,
@@ -1031,15 +1025,7 @@ void ThumbnailBloomEffect::watch(EffectWindow *w)
 // Layout
 // ---------------------------------------------------------------------------
 
-void ThumbnailBloomEffect::scheduleRelayout()
-{
-    // A delayed pass already pending runs this change along with its own; what
-    // it must not do is run it now.
-    if (m_relayoutTimer.isActive()) {
-        return;
-    }
-    m_relayoutTimer.start(0);
-}
+void ThumbnailBloomEffect::scheduleRelayout() { m_relayoutTimer.start(); }
 
 std::chrono::milliseconds ThumbnailBloomEffect::compositorAnimation(Transition transition) const
 {
@@ -1070,7 +1056,7 @@ std::chrono::milliseconds ThumbnailBloomEffect::compositorAnimation(Transition t
     };
 
     // Read per call rather than kept: which effects are loaded changes at
-    // runtime, and a delay is asked for once per window opened or closed.
+    // runtime, and a delay is asked for once per burst.
     const KSharedConfigPtr config = KSharedConfig::openConfig(QStringLiteral("kwinrc"));
     std::chrono::milliseconds longest { 0 };
     for (const Entry &entry : table) {
@@ -1094,38 +1080,30 @@ std::chrono::milliseconds ThumbnailBloomEffect::compositorAnimation(Transition t
     return longest;
 }
 
-void ThumbnailBloomEffect::delayRelayout(Transition transition)
+void ThumbnailBloomEffect::releaseBurst()
 {
-    const std::chrono::milliseconds delay = compositorAnimation(transition);
-    // Lengthened, never shortened: two delays in a row wait for the later one.
-    if (m_relayoutTimer.isActive() && m_relayoutTimer.remainingTime() >= delay.count()) {
-        return;
-    }
-    m_relayoutDelayed = true;
-    m_relayoutTimer.start(delay);
-}
-
-bool ThumbnailBloomEffect::topsScreen(EffectWindow *w) const
-{
-    if (!isRelevant(w)) {
-        return false;
-    }
-    // Top down, stopping at the first relevant window of the screen: the stack
-    // already holds the new window by the time its arrival is announced.
-    const auto stack = effects->stackingOrder();
-    for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
-        if ((*it)->screen() == w->screen() && isRelevant(*it)) {
-            return *it == w;
+    for (auto &[w, state] : m_states) {
+        if (!state.held) {
+            continue;
         }
+        state.held = false;
+        // The trip starts now and at its own pace: a retarget during the hold
+        // may have restarted it with the curve for a thumbnail in motion, and
+        // this one has not moved yet.
+        state.timeline.setEasingCurve(QEasingCurve::InOutCubic);
+        state.timeline.reset();
+        // The one repaint the trip needs from outside the paint pass, which asks
+        // for every further one itself; nothing has asked for a frame meanwhile.
+        effects->addRepaint(RectF(
+            state.base.adjusted(-paintMargin, -paintMargin, paintMargin, paintMargin)));
     }
-    return false;
 }
 
 void ThumbnailBloomEffect::relayout()
 {
-    // Consumed here rather than where the pass ends, so a delayed pass that
-    // stands down or freezes below is spent all the same.
-    const bool afterDelay = std::exchange(m_relayoutDelayed, false);
+    // Consumed here rather than where the pass ends, so a pass that stands down
+    // or freezes below spends it all the same.
+    const Transition cause = std::exchange(m_burstCause, Transition::Restore);
 
     // Overview, Window View, Desktop Grid and the desktop slide all put the
     // session up as it really is, so nothing of the effect's may be on the screen
@@ -1189,23 +1167,19 @@ void ThumbnailBloomEffect::relayout()
         ignored.push_back(isIgnored(w, maximized.back(), parents));
     }
 
-    // A screen taking the backdrop exception back is one whose maximized window
-    // has just been restored, minimized or covered, which the compositor animates
-    // in its own way, and the burst is not seen at all if it plays across that.
-    // Nothing above tells that apart from any other change, so the pass finds
-    // it out here, puts the backdrop set back as it was and comes back after
-    // that animation to run in full; nothing else worked out so far is kept
-    // from one pass to the next. The pass a close delayed is one such delayed
-    // pass, so the dive it brings (the window over the maximized one going
-    // away) waits for the close animation and a dive waits for nothing else.
-    const QSet<LogicalOutput *> previousBackdrops = m_backdropScreens;
     updateBackdropScreens(relevant, ignored, maximized);
-    if (!afterDelay && !m_burstScreens.isEmpty()) {
-        m_backdropScreens = previousBackdrops;
-        m_burstScreens.clear();
-        m_diveScreens.clear();
-        delayRelayout(Transition::Restore);
-        return;
+
+    // A screen taking the backdrop exception back is one whose maximized window
+    // has just been restored, minimized or covered, or one a window over it has
+    // opened or closed on, and the compositor animates each of those in its own
+    // way: a burst played across that is not seen at all. Only the thumbnails
+    // of the burst wait (retarget() holds them at the point while this runs);
+    // the layout itself is settled now like any other.
+    if (!m_burstScreens.isEmpty()) {
+        const std::chrono::milliseconds hold = compositorAnimation(cause);
+        if (hold.count() > 0) {
+            m_burstTimer.start(hold);
+        }
     }
 
     // Windows only ever collide with windows of their own screen, so each screen
@@ -1422,6 +1396,11 @@ void ThumbnailBloomEffect::retarget(
     // speak of is still sent home rather than made to dive into itself.
     const bool diving = thumbnail && base.isEmpty();
     state.diving = diving;
+    // A thumbnail held at its burst point that is sent home (picked, uncovered)
+    // or into a dive has stopped being part of the burst and goes at once.
+    if (!thumbnail || diving) {
+        state.held = false;
+    }
 
     // The burst only starts a thumbnail that is not on screen yet: one already
     // in motion (a dive turned around halfway among them) carries on from
@@ -1536,6 +1515,9 @@ void ThumbnailBloomEffect::retarget(
         state.caption.snap(0.0);
         state.bend.snap(0.0);
         state.highlight.snap(0.0);
+        // Waits at the point for the compositor's own animation, when relayout()
+        // found one to wait for.
+        state.held = bursting && m_burstTimer.isActive();
     } else if (sameRect(state.rect.to, target)
         && qFuzzyCompare(state.opacity.to, targetOpacity)
         && qFuzzyCompare(state.caption.to, targetCaption)
@@ -2078,11 +2060,15 @@ void ThumbnailBloomEffect::updateInputWindows()
         if (!input.target) {
             input.target = std::make_unique<ThumbnailOverlay>();
             // Which thumbnail a gesture is on is answered from the hit regions,
-            // which is what the mask is the union of.
+            // which is what the mask is the union of. A thumbnail held for its
+            // burst answers nothing: it is not on screen yet, so a click on it is
+            // aimed at something else. The click target still swallows the
+            // gesture, the regions being disjoint, so nothing reaches the window
+            // underneath either.
             input.target->setResolver([this](const QPointF &pos) -> QObject * {
                 for (const auto &[w, state] : m_states) {
                     if (state.hitRegion.contains(pos.toPoint())) {
-                        return w;
+                        return state.held ? nullptr : w;
                     }
                 }
                 return nullptr;
@@ -2690,7 +2676,9 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
         // minutes therefore adds nothing to the damage, which is what keeps the
         // repaint of an unrelated corner of the screen from redrawing every
         // thumbnail on it.
-        const bool moving = !state.timeline.done();
+        // A held thumbnail is not moving either: its timeline stays where the
+        // burst reset it, so its clock starts on the first step after the hold.
+        const bool moving = !state.held && !state.timeline.done();
 
         // A thumbnail whose trip was over before this step is exactly where the
         // last one left it, and so is everything drawn on it: every channel is
@@ -2713,7 +2701,9 @@ std::vector<EffectWindow *> ThumbnailBloomEffect::advanceAnimations(ScreenPrePai
             continue;
         }
 
-        state.timeline.advance(data.view);
+        if (!state.held) {
+            state.timeline.advance(data.view);
+        }
         const qreal progress = state.timeline.value();
         state.rect.interpolate(progress);
         state.opacity.interpolate(progress);

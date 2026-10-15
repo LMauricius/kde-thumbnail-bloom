@@ -185,6 +185,9 @@ private:
             = false; //!< whether the thumbnail is shrinking into the burst point of its screen
         bool homing
             = false; //!< whether the running trip is the one back to the window's real geometry
+        //! Whether the thumbnail waits at its burst point, its timeline not advancing, until
+        //! m_burstTimer lets the compositor's own animation play out first; see releaseBurst().
+        bool held = false;
         //! What the click target claims, in screen coordinates: the resting rectangle, or the
         //! whole enlarged one once a click has landed on it, either way minus what covers it
         //! (a panel, a popup, or the enlarged rectangle of the thumbnail holding the pointer).
@@ -287,12 +290,12 @@ private:
     void showInPlace(KWin::EffectWindow *w);
     /*! Queues a relayout for the next event loop pass, coalescing bursts of changes. */
     void scheduleRelayout();
-    /*! The compositor animations a relayout may have to wait for; see compositorAnimation(). */
+    /*! The compositor animations a burst may have to wait for; see compositorAnimation(). */
     enum class Transition
     {
         Open, //!< a window being animated in
         Close, //!< a window being animated out
-        Restore, //!< a maximized window being restored or minimized
+        Restore, //!< a maximized window being restored or minimized, or anything else
     };
     /*!
      * How long the compositor takes over \a transition right now: the longest
@@ -303,20 +306,10 @@ private:
      */
     std::chrono::milliseconds compositorAnimation(Transition transition) const;
     /*!
-     * Queues the relayout after the compositor's own animation for \a transition
-     * instead, so the thumbnails set off once it has played out rather than
-     * across it. A delay already pending is never cut short by an ordinary
-     * scheduleRelayout() arriving in the meantime: the change it carries would
-     * start the very thumbnails the delay holds back. Kept apart from
-     * scheduleRelayout() rather than a flag on it, since that one is connected
-     * to signals whose window argument would convert to true.
+     * Sets off every burst thumbnail that has been held at its burst point;
+     * see BloomState::held.
      */
-    void delayRelayout(Transition transition);
-    /*!
-     * Whether \a w is the topmost relevant window of its screen, which is what a
-     * newly opened window has to be for its arrival to change the layout at all.
-     */
-    bool topsScreen(KWin::EffectWindow *w) const;
+    void releaseBurst();
     /*!
      * Starts or retargets the animation of \a w towards \a placement, grown if
      * hovered and rounded to whole physical pixels either way, since that is
@@ -642,8 +635,10 @@ private:
     //! setOwnWindowVisible().
     int m_ownWindowChange = 0;
     QTimer m_relayoutTimer;
-    //! Whether the pending relayout is the delayed one, which then runs whatever it finds.
-    bool m_relayoutDelayed = false;
+    //! Holds the thumbnails of a burst back for the length of the compositor's animation.
+    QTimer m_burstTimer;
+    //! What the change the next relayout catches up with was, which picks that animation.
+    Transition m_burstCause = Transition::Restore;
     std::chrono::milliseconds m_animationDuration { 250 };
     bool m_showIcons = true;
     bool m_showTitles = true;
