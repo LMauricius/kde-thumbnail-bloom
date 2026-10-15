@@ -287,6 +287,36 @@ private:
     void showInPlace(KWin::EffectWindow *w);
     /*! Queues a relayout for the next event loop pass, coalescing bursts of changes. */
     void scheduleRelayout();
+    /*! The compositor animations a relayout may have to wait for; see compositorAnimation(). */
+    enum class Transition
+    {
+        Open, //!< a window being animated in
+        Close, //!< a window being animated out
+        Restore, //!< a maximized window being restored or minimized
+    };
+    /*!
+     * How long the compositor takes over \a transition right now: the longest
+     * duration among the effects loaded for it, with the global animation speed
+     * folded in, or zero when none is. KWin offers no way to ask an effect for
+     * its duration, so the stock effects are looked up by name in a table of
+     * their config keys and defaults, read from kwinrc the way they read it.
+     */
+    std::chrono::milliseconds compositorAnimation(Transition transition) const;
+    /*!
+     * Queues the relayout after the compositor's own animation for \a transition
+     * instead, so the thumbnails set off once it has played out rather than
+     * across it. A delay already pending is never cut short by an ordinary
+     * scheduleRelayout() arriving in the meantime: the change it carries would
+     * start the very thumbnails the delay holds back. Kept apart from
+     * scheduleRelayout() rather than a flag on it, since that one is connected
+     * to signals whose window argument would convert to true.
+     */
+    void delayRelayout(Transition transition);
+    /*!
+     * Whether \a w is the topmost relevant window of its screen, which is what a
+     * newly opened window has to be for its arrival to change the layout at all.
+     */
+    bool topsScreen(KWin::EffectWindow *w) const;
     /*!
      * Starts or retargets the animation of \a w towards \a placement, grown if
      * hovered and rounded to whole physical pixels either way, since that is
@@ -295,8 +325,8 @@ private:
      * An empty \a placement is the dive: the thumbnail is not heading anywhere it
      * could be seen, it is shrinking into the point its whole screen collapses
      * to, and the state is dropped once it arrives. \a burst is the other half
-     * of the same gesture: the trip then starts at that point, at no size and
-     * fully transparent, rather than wherever the thumbnail happens to be.
+     * of the same gesture: a thumbnail not yet on screen then starts at that
+     * point, at no size and fully transparent, rather than at its window.
      */
     void retarget(KWin::EffectWindow *w, const QRectF &placement, const QPointF *burst = nullptr);
     /*!
@@ -612,6 +642,8 @@ private:
     //! setOwnWindowVisible().
     int m_ownWindowChange = 0;
     QTimer m_relayoutTimer;
+    //! Whether the pending relayout is the delayed one, which then runs whatever it finds.
+    bool m_relayoutDelayed = false;
     std::chrono::milliseconds m_animationDuration { 250 };
     bool m_showIcons = true;
     bool m_showTitles = true;

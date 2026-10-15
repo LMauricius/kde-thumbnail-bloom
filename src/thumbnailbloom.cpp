@@ -28,6 +28,8 @@
 #include <effect/effectwindow.h>
 
 #include <KColorScheme>
+#include <KConfigGroup>
+#include <KSharedConfig>
 
 #include <QGuiApplication>
 #include <QHash>
@@ -38,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <utility>
 #include <span>
 #include <vector>
 
@@ -811,7 +814,17 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
             return;
         }
         watch(w);
-        scheduleRelayout();
+        // A window opening on top of its screen is one the compositor is
+        // animating in, and the thumbnails it pushes into bloom wait for that
+        // to be over. One opening under the others changes nothing up there.
+        // A maximized one is the exception: it takes the screen over, so every
+        // thumbnail there dives into it, and that dive plays along with the
+        // window coming in rather than after it.
+        if (topsScreen(w) && !isMaximized(w)) {
+            delayRelayout(Transition::Open);
+        } else {
+            scheduleRelayout();
+        }
     });
     connect(effects, &EffectsHandler::windowClosed, this, [this](EffectWindow *w) {
         if (w == m_menuPopup) {
@@ -824,7 +837,14 @@ ThumbnailBloomEffect::ThumbnailBloomEffect()
             return;
         }
         forget(w);
-        scheduleRelayout();
+        // A window of the layout closing is animated out by the compositor, and
+        // the thumbnails coming home or shuffling up wait for that. Asked of the
+        // last layout's set rather than of the window, which is deleted by now.
+        if (m_relevantWindows.count(w)) {
+            delayRelayout(Transition::Close);
+        } else {
+            scheduleRelayout();
+        }
     });
     connect(effects, &EffectsHandler::windowDeleted, this, [this](EffectWindow *w) { forget(w); });
     connect(effects, &EffectsHandler::windowActivated, this,
@@ -1011,10 +1031,102 @@ void ThumbnailBloomEffect::watch(EffectWindow *w)
 // Layout
 // ---------------------------------------------------------------------------
 
-void ThumbnailBloomEffect::scheduleRelayout() { m_relayoutTimer.start(); }
+void ThumbnailBloomEffect::scheduleRelayout()
+{
+    // A delayed pass already pending runs this change along with its own; what
+    // it must not do is run it now.
+    if (m_relayoutTimer.isActive()) {
+        return;
+    }
+    m_relayoutTimer.start(0);
+}
+
+std::chrono::milliseconds ThumbnailBloomEffect::compositorAnimation(Transition transition) const
+{
+    // What each stock effect animates, and where it reads its duration from:
+    // the key in its own config group, or none for a hardcoded one, and the
+    // default it falls back on. `factor` is what the fade effect multiplies its
+    // fade-out by after the config is read. A third-party effect standing in for
+    // one of these is not known here, and the stock one it replaces is then
+    // unloaded, so the delay falls back to whatever else is loaded.
+    struct Entry
+    {
+        Transition transition;
+        const char *effect;
+        const char *key;
+        int defaultMs;
+        int factor;
+    };
+    static constexpr Entry table[] = {
+        { Transition::Open, "scale", "Duration", 200, 1 },
+        { Transition::Close, "scale", "Duration", 200, 1 },
+        { Transition::Open, "fade", "FadeInTime", 150, 1 },
+        { Transition::Close, "fade", "FadeOutTime", 150, 4 },
+        { Transition::Open, "glide", "Duration", 160, 1 },
+        { Transition::Close, "glide", "Duration", 160, 1 },
+        { Transition::Restore, "maximize", nullptr, 250, 1 },
+        { Transition::Restore, "magiclamp", "AnimationDuration", 250, 1 },
+        { Transition::Restore, "squash", nullptr, 250, 1 },
+    };
+
+    // Read per call rather than kept: which effects are loaded changes at
+    // runtime, and a delay is asked for once per window opened or closed.
+    const KSharedConfigPtr config = KSharedConfig::openConfig(QStringLiteral("kwinrc"));
+    std::chrono::milliseconds longest { 0 };
+    for (const Entry &entry : table) {
+        if (entry.transition != transition
+            || !effects->isEffectLoaded(QString::fromLatin1(entry.effect))) {
+            continue;
+        }
+        // Every one of them reads it the same way: the configured value unless
+        // that is zero, then scaled by the global animation speed either way.
+        // Not the KConfigGroup overload of animationTime(), which leaves a
+        // configured value unscaled and so answers differently from them.
+        int ms = 0;
+        if (entry.key) {
+            ms = config->group(QLatin1String("Effect-") + QLatin1String(entry.effect))
+                     .readEntry(entry.key, 0);
+        }
+        const std::chrono::milliseconds duration
+            = animationTime(std::chrono::milliseconds(ms > 0 ? ms : entry.defaultMs));
+        longest = std::max(longest, duration * entry.factor);
+    }
+    return longest;
+}
+
+void ThumbnailBloomEffect::delayRelayout(Transition transition)
+{
+    const std::chrono::milliseconds delay = compositorAnimation(transition);
+    // Lengthened, never shortened: two delays in a row wait for the later one.
+    if (m_relayoutTimer.isActive() && m_relayoutTimer.remainingTime() >= delay.count()) {
+        return;
+    }
+    m_relayoutDelayed = true;
+    m_relayoutTimer.start(delay);
+}
+
+bool ThumbnailBloomEffect::topsScreen(EffectWindow *w) const
+{
+    if (!isRelevant(w)) {
+        return false;
+    }
+    // Top down, stopping at the first relevant window of the screen: the stack
+    // already holds the new window by the time its arrival is announced.
+    const auto stack = effects->stackingOrder();
+    for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
+        if ((*it)->screen() == w->screen() && isRelevant(*it)) {
+            return *it == w;
+        }
+    }
+    return false;
+}
 
 void ThumbnailBloomEffect::relayout()
 {
+    // Consumed here rather than where the pass ends, so a delayed pass that
+    // stands down or freezes below is spent all the same.
+    const bool afterDelay = std::exchange(m_relayoutDelayed, false);
+
     // Overview, Window View, Desktop Grid and the desktop slide all put the
     // session up as it really is, so nothing of the effect's may be on the screen
     // while one of them runs. There is no meeting them half way: they fly each
@@ -1077,7 +1189,24 @@ void ThumbnailBloomEffect::relayout()
         ignored.push_back(isIgnored(w, maximized.back(), parents));
     }
 
+    // A screen taking the backdrop exception back is one whose maximized window
+    // has just been restored, minimized or covered, which the compositor animates
+    // in its own way, and the burst is not seen at all if it plays across that.
+    // Nothing above tells that apart from any other change, so the pass finds
+    // it out here, puts the backdrop set back as it was and comes back after
+    // that animation to run in full; nothing else worked out so far is kept
+    // from one pass to the next. The pass a close delayed is one such delayed
+    // pass, so the dive it brings (the window over the maximized one going
+    // away) waits for the close animation and a dive waits for nothing else.
+    const QSet<LogicalOutput *> previousBackdrops = m_backdropScreens;
     updateBackdropScreens(relevant, ignored, maximized);
+    if (!afterDelay && !m_burstScreens.isEmpty()) {
+        m_backdropScreens = previousBackdrops;
+        m_burstScreens.clear();
+        m_diveScreens.clear();
+        delayRelayout(Transition::Restore);
+        return;
+    }
 
     // Windows only ever collide with windows of their own screen, so each screen
     // is laid out on its own. The stacking order is preserved per screen.
@@ -1138,12 +1267,13 @@ void ThumbnailBloomEffect::applyPlacements(
     for (auto it = perScreen.cbegin(); it != perScreen.cend(); ++it) {
         const QRectF workArea = effects->clientArea(MaximizeArea, it.key());
 
-        // A screen that has just taken the backdrop exception back shows every
-        // thumbnail it has at once, so they all set off from the one point
-        // instead of from the windows they belong to. Nothing else changes: they
-        // are laid over the backdrop as always, which draws them under the
-        // window that speaks for the screen and so has them come out from behind
-        // it.
+        // A screen that has just taken the backdrop exception back shows its
+        // thumbnails all at once, so the ones whose windows a backdrop still
+        // hides set off from the one point instead of from those windows. A
+        // window partly in sight blooms from where it is seen, as ever. Nothing
+        // else changes: they are laid over the backdrop as always, which draws
+        // them under the window that speaks for the screen and so has them come
+        // out from behind it.
         const bool bursting = m_burstScreens.contains(it.key());
         const QPointF burst = bursting ? burstPoint(it.key()) : QPointF();
 
@@ -1167,7 +1297,8 @@ void ThumbnailBloomEffect::applyPlacements(
             }
 
             bloomed.insert(w);
-            retarget(w, placement.rect, bursting ? &burst : nullptr);
+            const bool hidden = bursting && underBackdrop(it.value(), w, frameRect(w), bloomed);
+            retarget(w, placement.rect, hidden ? &burst : nullptr);
             // The grab is over: an ordinary thumbnail again, drawn out of the
             // stacking order only for the reasons every other one is.
             m_states.at(w).blocked = false;
@@ -1290,14 +1421,12 @@ void ThumbnailBloomEffect::retarget(
     // it. Asked of a real destination only, so that a window with no geometry to
     // speak of is still sent home rather than made to dive into itself.
     const bool diving = thumbnail && base.isEmpty();
-    const bool wasDiving = state.diving;
     state.diving = diving;
 
-    // The burst only puts a thumbnail at the point when it is not already on its
-    // way there: a dive turned around halfway carries on from wherever it has
-    // got to, exactly as every other reversed trip does, rather than jumping
-    // back to the point first.
-    const bool bursting = burst && !wasDiving;
+    // The burst only starts a thumbnail that is not on screen yet: one already
+    // in motion (a dive turned around halfway among them) carries on from
+    // wherever it has got to, exactly as every other reversed trip does.
+    const bool bursting = burst && inserted;
     // Whether the thumbnail is drawn above its resting size at this very moment,
     // measured against the rectangle it was resting at before this trip: it has
     // to be read before that rectangle is replaced below.
@@ -1398,30 +1527,21 @@ void ThumbnailBloomEffect::retarget(
     updateHitRegion(w, state);
     updateCanvas(w, state);
 
+    // A new thumbnail sets off from its window, or from the burst point at no
+    // size and fully transparent, so that a whole screen of them appears to
+    // come out of the window that speaks for it.
     if (inserted) {
-        state.rect.snap(frameRect(w));
-        state.opacity.snap(1.0);
+        state.rect.snap(bursting ? QRectF(*burst, QSizeF(0, 0)) : frameRect(w));
+        state.opacity.snap(bursting ? 0.0 : 1.0);
         state.caption.snap(0.0);
         state.bend.snap(0.0);
         state.highlight.snap(0.0);
-    } else if (!bursting && sameRect(state.rect.to, target)
+    } else if (sameRect(state.rect.to, target)
         && qFuzzyCompare(state.opacity.to, targetOpacity)
         && qFuzzyCompare(state.caption.to, targetCaption)
         && qFuzzyCompare(state.bend.to, targetBend)
         && qFuzzyCompare(state.highlight.to, targetHighlight)) {
         return;
-    }
-
-    // The burst puts every thumbnail of its screen at the one point before any
-    // of them sets off, so that they all appear to come out of the window that
-    // speaks for the screen. It is applied after the insertion above, which
-    // would otherwise start a new thumbnail at the window it belongs to.
-    if (bursting) {
-        state.rect.snap(QRectF(*burst, QSizeF(0, 0)));
-        state.opacity.snap(0.0);
-        state.caption.snap(0.0);
-        state.bend.snap(0.0);
-        state.highlight.snap(0.0);
     }
 
     // Every retarget starts a whole new trip, from where the thumbnail is right
@@ -1454,7 +1574,7 @@ void ThumbnailBloomEffect::retarget(
     // then on. Once the clock is spent, every further re-aim lands the thumbnail
     // on the window at once, so it follows exactly until it is dropped.
     if (!following) {
-        state.timeline.setEasingCurve((inserted || bursting || state.timeline.done())
+        state.timeline.setEasingCurve((inserted || state.timeline.done())
                 ? QEasingCurve::InOutCubic
                 : QEasingCurve::OutCubic);
         state.timeline.setDuration(m_animationDuration);
