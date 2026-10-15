@@ -175,15 +175,13 @@ static qreal clamped(qreal value, qreal lower, qreal upper)
     return std::max(lower, std::min(value, upper));
 }
 
-constexpr qreal MIN_NOTICABLE_SIZE = 48.0;
-
 /*!
  * Places a \a size sized rectangle as close to \a desiredCenter as the free
  * space in \a free allows. Returns nothing when \a size fits nowhere.
  * Otherwise returns a pair of the placement rect and cost
  */
-static std::optional<std::pair<QRectF, qreal>> nearestPlacement(
-    const QRectF &band, const QRectF &geometry, const QSizeF &initialSize)
+static std::optional<std::pair<QRectF, qreal>> nearestPlacement(const QRectF &band,
+    const QRectF &geometry, const QSizeF &initialSize, const QPointF &coverRegionAverage)
 {
     // Shrink (never grow) until the thumbnail fits the band, keeping the aspect ratio.
     QSizeF size = initialSize;
@@ -195,17 +193,33 @@ static std::optional<std::pair<QRectF, qreal>> nearestPlacement(
         size *= band.height() / size.height();
     }
 
-    // Each free band is a rectangle of its own; the closest position within a
-    // band is the desired one clamped to the band's placeable range.
+    // 0.0-1.0, how much the band's own window-independant locus of the covered region average
+    // affects the locus within the band, as opposed to the windows original position.
+    // Smaller windows are kept closer to their own positions to prevent them flying over the place,
+    // while larger ones are moved closer to the covered region to not distract or take free space
+    qreal coveredLocusWeightH = geometry.width() / band.width();
+    qreal coveredLocusWeightV = geometry.height() / band.height();
+
     const qreal hRange = band.width() - geometry.width();
     const qreal vRange = band.height() - geometry.height();
+
+    // Each free band is a rectangle of its own; the closest position within a
+    // band is the desired one clamped to the band's placeable range.
+    const qreal hLocusNatural = (geometry.x() - band.x()) / hRange;
+    const qreal vLocusNatural = (geometry.y() - band.y()) / vRange;
+
+    // The band's own best placement position is the locus of the covered region's average
+    // The effect is that usually windows will be placed into corners, but bands closer to the
+    // relevant workspace region's center will have windows placed in the center.
+    // This is used for bigger windows
+    const qreal hLocusCovered = (coverRegionAverage.x() - band.x()) / band.width();
+    const qreal vLocusCovered = (coverRegionAverage.y() - band.y()) / band.height();
+
     const qreal hLocus
-        = clamped(hRange > MIN_NOTICABLE_SIZE ? (geometry.x() - band.x()) / hRange
-                                              : (geometry.center().x() - band.x()) / band.width(),
+        = clamped(hLocusNatural * (1.0 - coveredLocusWeightH) + hLocusCovered * coveredLocusWeightH,
             0.0, 1.0);
     const qreal vLocus
-        = clamped(vRange > MIN_NOTICABLE_SIZE ? (geometry.y() - band.y()) / vRange
-                                              : (geometry.center().y() - band.y()) / band.height(),
+        = clamped(vLocusNatural * (1.0 - coveredLocusWeightV) + vLocusCovered * coveredLocusWeightV,
             0.0, 1.0);
 
     const QRectF candidate {
@@ -302,7 +316,7 @@ struct SizedSlot
  * the smallest size fits anywhere.
  */
 static std::optional<SizedSlot> searchSlot(const ExtendedRegion &free, const QRectF &geometry,
-    qreal startScale, const LayoutOptions &options, bool packed)
+    qreal startScale, const LayoutOptions &options, bool packed, const QPointF &coverRegionAverage)
 {
     // Shrink first, move second: try the starting size and only adjust it as needed to fit a spot
     const QSizeF initialSize = geometry.size() * startScale;
@@ -332,7 +346,7 @@ static std::optional<SizedSlot> searchSlot(const ExtendedRegion &free, const QRe
 
         const std::optional<std::pair<QRectF, qreal>> placement = packed
             ? packedPlacement(band, geometry, initialSize)
-            : nearestPlacement(band, geometry, initialSize);
+            : nearestPlacement(band, geometry, initialSize, coverRegionAverage);
 
         if (placement) {
             auto [candidate, cost] = placement.value();
@@ -481,6 +495,10 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, std::vector<bo
     uncovered -= seed;
     free = area;
     free -= seed;
+    qreal coveredPosSumX = 0.0;
+    qreal coveredPosSumY = 0.0;
+    qreal coveredWeightSumX = 0.0;
+    qreal coveredWeightSumY = 0.0;
 
     QList<Placement> placements;
     qreal scaleSum = 0;
@@ -510,18 +528,27 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, std::vector<bo
         if (!bloomed[i]) {
             if (!window.backdrop) {
                 uncovered -= grown(geometry, options.margin);
+                coveredWeightSumX += geometry.width();
+                coveredPosSumX += geometry.center().x() * geometry.width();
+                coveredWeightSumY += geometry.height();
+                coveredPosSumY += geometry.center().y() * geometry.height();
             }
             continue;
         }
         ++count;
 
+        QPointF coveredAvg = {
+            coveredWeightSumX > 0.0 ? coveredPosSumX / coveredWeightSumX : window.geometry.x(),
+            coveredWeightSumY > 0.0 ? coveredPosSumY / coveredWeightSumY : window.geometry.y(),
+        };
+
         std::optional<SizedSlot> slot
-            = searchSlot(free, window.geometry, startScale, options, packed);
+            = searchSlot(free, window.geometry, startScale, options, packed, coveredAvg);
 
         // Since we couldn't put the thumbnail in the completely free area,
         // allow placement over the windows it would cover anyways
         if (!slot) {
-            slot = searchSlot(uncovered, window.geometry, startScale, options, packed);
+            slot = searchSlot(uncovered, window.geometry, startScale, options, packed, coveredAvg);
         }
 
         // Not even the smallest thumbnail fits: leave the window alone rather
@@ -534,6 +561,10 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, std::vector<bo
             auto g = grown(geometry, options.margin);
             free -= g;
             uncovered -= g;
+            coveredWeightSumX += geometry.width();
+            coveredPosSumX += geometry.center().x() * geometry.width();
+            coveredWeightSumY += geometry.height();
+            coveredPosSumY += geometry.center().y() * geometry.height();
             continue;
         }
 
@@ -542,6 +573,10 @@ static QList<Placement> runPass(const QList<LayoutWindow> &stack, std::vector<bo
         auto g = grown(slot->rect, options.margin);
         free -= g;
         uncovered -= g;
+        coveredWeightSumX += geometry.width();
+        coveredPosSumX += geometry.center().x() * geometry.width();
+        coveredWeightSumY += geometry.height();
+        coveredPosSumY += geometry.center().y() * geometry.height();
     }
 
     if (averageScale) {
