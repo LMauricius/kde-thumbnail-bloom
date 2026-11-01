@@ -1,0 +1,30 @@
+Source: kde-thumbnail-bloom
+Section: kde
+Maintainer: Christopher Roy Bratusek <nano@jpberlin.de>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+ kwin-dev,
+ libkf6kcmutils-dev,
+ libkf6i18n-dev,
+ libkf6configwidgets-dev,
+ libkf6colorscheme-dev
+Standards-Version: 4.7.4
+Homepage: https://github.com/LMauricius/kde-thumbnail-bloom
+Rules-Requires-Root: no
+
+Package: kde-thumbnail-bloom
+Architecture: any
+Replaces: kwin-effect-thumbnail-bloom
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: A KWin desktop effect for Plasma
+ Whenever an inactive window disappears behind another one, Thumbnail Bloom
+ shrinks it into a thumbnail and slides that thumbnail to the nearest free spot
+ on the same screen, so nothing is ever completely hidden. Click a thumbnail to
+ bring its window back to the front, drag it to move the window out of the
+ thumbnail, or right-click it for the window menu.
+ .
+ Windows are never actually moved or resized: they are only painted somewhere
+ else, at a smaller size.
