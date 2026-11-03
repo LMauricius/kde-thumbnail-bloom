@@ -3042,7 +3042,7 @@ void ThumbnailBloomEffect::prePaintWindow(
     Effect::prePaintWindow(view, w, data);
 }
 
-void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
+bool ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion,
     WindowPaintData &data)
 {
@@ -3056,9 +3056,11 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     //
     // The click targets and the shields are never drawn again at all. They take
     // input and paint nothing, and a window that paints nothing is still a
-    // transparent quad the scene blends over the damage on every frame.
+    // transparent quad the scene blends over the damage on every frame. The
+    // result is success, not "painted": false aborts the rest of the pass
+    // (the cursor included).
     if (isOwnOverlay(w)) {
-        return;
+        return true;
     }
 
     // The lifted thumbnails are left out at their own places in the stacking
@@ -3085,7 +3087,9 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
             applyTransform(w, it->second, data);
         }
 
-        Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data);
+        if (!Effect::paintWindow(renderTarget, viewport, w, mask, deviceRegion, data)) {
+            return false;
+        }
 
         if (it != m_states.end()) {
             drawCanvas(renderTarget, viewport, it->second, deviceRegion);
@@ -3100,16 +3104,17 @@ void ThumbnailBloomEffect::paintWindow(const RenderTarget &renderTarget,
     if (w == m_liftedAbove.anchor) {
         drawLifted(renderTarget, viewport, m_liftedAbove, deviceRegion);
     }
+
+    return true;
 }
 
-void ThumbnailBloomEffect::drawWindow(const RenderTarget &renderTarget,
+bool ThumbnailBloomEffect::drawWindow(const RenderTarget &renderTarget,
     const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion,
     WindowPaintData &data)
 {
     const auto it = m_states.find(w);
     if (it == m_states.end() || !it->second.snapshot || !refreshSnapshot(w, it->second)) {
-        Effect::drawWindow(renderTarget, viewport, w, mask, deviceRegion, data);
-        return;
+        return Effect::drawWindow(renderTarget, viewport, w, mask, deviceRegion, data);
     }
 
     // One quad over everything the window paints, in window coordinates: the
@@ -3131,6 +3136,8 @@ void ThumbnailBloomEffect::drawWindow(const RenderTarget &renderTarget,
     apply(w, mask, data, quads);
 
     paintSnapshot(renderTarget, viewport, w, it->second, deviceRegion, data, quads);
+
+    return true;
 }
 
 bool ThumbnailBloomEffect::isLifted(EffectWindow *w) const
